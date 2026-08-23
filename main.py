@@ -8,11 +8,12 @@ from telebot.types import (
     ReplyKeyboardMarkup,
     KeyboardButton
 )
+import json
+from datetime import datetime, timedelta
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Админы через запятую
 ADMIN_IDS = [
     int(x)
     for x in os.getenv("ADMIN_IDS", "").split(",")
@@ -51,6 +52,12 @@ def init_db():
             registered BOOLEAN DEFAULT FALSE,
             is_banned BOOLEAN DEFAULT FALSE,
             ban_reason TEXT,
+            rating FLOAT DEFAULT 0,
+            daily_bonus_count INT DEFAULT 0,
+            daily_bonus_date DATE,
+            weekly_top INT DEFAULT 0,
+            rank VARCHAR(50) DEFAULT 'Новичок',
+            views_count INT DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -216,6 +223,93 @@ HIGH_RATINGS = {
     "True Eve"
 }
 
+RATING_MEANINGS = {
+    "Sub3": "😢 **Очень низкая оценка** — есть много работы над собой. Начни с малого: спорт, уход, стиль.",
+    "Sub5": "😐 **Ниже среднего** — потенциал есть, но нужно развивать.",
+    "LLTN": "😕 **Low Low Tier Normie** — ты на старте. Первые шаги: измени причёску и добавь спорта.",
+    "LTN": "🙂 **Low Tier Normie** — неплохо, но есть куда расти.",
+    "HLTN": "😊 **High Low Tier Normie** — выше среднего. Добавь немного стиля в одежде.",
+    "LMTN": "😄 **Low Mid Tier Normie** — ты уже в хорошей форме. Работай над осанкой.",
+    "MTN": "😍 **Mid Tier Normie** — база хорошая. Теперь работай над деталями.",
+    "HMTN": "🔥 **High Mid Tier Normie** — ты выше среднего. Отличная симметрия лица.",
+    "LHTN": "💎 **Low High Tier Normie** — почти топ. Добавь уверенности.",
+    "HTN": "✨ **High Tier Normie** — ты в топ-15%.",
+    "HHTN": "🌟 **High High Tier Normie** — ты среди лучших.",
+    "CHAD LITE": "👑 **Почти Чад** — у тебя мощный потенциал.",
+    "TRUE ADAM": "👨‍🦱 **Идеал** — ты лучшее, что есть.",
+    "LLTB": "😕 **Low Low Tier Beauty** — начни с малого.",
+    "LTB": "🙂 **Low Tier Beauty** — ты красива, но не раскрыта.",
+    "HLTB": "😊 **High Low Tier Beauty** — ты на подъёме.",
+    "LMTB": "😄 **Low Mid Tier Beauty** — отличная база.",
+    "MTB": "😍 **Mid Tier Beauty** — ты уже хороша.",
+    "HMTB": "🔥 **High Mid Tier Beauty** — ты шикарна.",
+    "LHTB": "💎 **Low High Tier Beauty** — почти идеал.",
+    "HTB": "✨ **High Tier Beauty** — ты в топе.",
+    "HHTB": "🌟 **High High Tier Beauty** — ты среди лучших.",
+    "Stacy": "👑 **Stacy** — ты идеал женской красоты.",
+    "True Eve": "👸 **True Eve** — абсолютная женственность."
+}
+
+RANK_EMOJIS = {
+    "Новичок": "🧑‍🎓",
+    "Любопытный": "👀",
+    "Оценщик": "🔥",
+    "Луксмаксер": "🏆",
+    "Король": "👑",
+    "Легенда": "💎"
+}
+
+
+def get_rank(user_data):
+    user_id = user_data["id"]
+    ratings_given = get_ratings_given(user_id)
+    ratings_received = len(get_user_ratings(user_id))
+    place, _ = get_user_place(user_id)
+
+    if place == 1 and ratings_received >= 100:
+        return "Легенда"
+    elif place == 1:
+        return "Король"
+    elif ratings_received >= 10:
+        return "Луксмаксер"
+    elif ratings_given >= 10:
+        return "Оценщик"
+    elif user_data.get("views_count", 0) >= 5:
+        return "Любопытный"
+    else:
+        return "Новичок"
+
+
+def get_ratings_given(user_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM ratings WHERE from_user=%s", (user_id,))
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return count
+
+
+def get_user_place(user_id):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT u.id, COUNT(r.id) as count
+        FROM users u
+        LEFT JOIN ratings r ON r.to_user = u.id
+        WHERE u.registered=TRUE AND u.is_banned=FALSE
+        GROUP BY u.id
+        ORDER BY count DESC
+    """)
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    for i, u in enumerate(users, 1):
+        if u["id"] == user_id:
+            return i, len(users)
+    return None, None
+
 
 def get_scale(gender):
     if gender == "female":
@@ -298,6 +392,17 @@ def rating_kb(gender, target_id):
         )
     )
 
+    return kb
+
+
+def rating_meaning_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton(
+            "📊 Что значит эта оценка?",
+            callback_data="show_rating_meaning"
+        )
+    )
     return kb
 
 
@@ -660,6 +765,8 @@ def save_rating(from_user, to_user, rating):
         rating
     )
 
+    update_daily_bonus(from_user)
+
 
 def check_match(
     from_user,
@@ -784,6 +891,47 @@ def notify_about_rating(
         )
     except Exception:
         pass
+
+
+def update_daily_bonus(user_id):
+    conn = get_db()
+    cur = conn.cursor()
+    today = datetime.now().date()
+
+    cur.execute(
+        "SELECT daily_bonus_date, daily_bonus_count FROM users WHERE id=%s",
+        (user_id,)
+    )
+    row = cur.fetchone()
+
+    if row and row[0] == today:
+        count = row[1] + 1
+        update_user(
+            user_id,
+            daily_bonus_date=today,
+            daily_bonus_count=count
+        )
+        if count >= 5:
+            update_user(
+                user_id,
+                rating=row[0] + 0.5,
+                weekly_top=1
+            )
+            bot.send_message(
+                user_id,
+                "🏆 **Ежедневный бонус активирован!**\n\n"
+                "Ты поставил 5 оценок сегодня. Твой рейтинг +0.5 и ты в топе недели! 🔥",
+                parse_mode="Markdown"
+            )
+    else:
+        update_user(
+            user_id,
+            daily_bonus_date=today,
+            daily_bonus_count=1
+        )
+
+    cur.close()
+    conn.close()
 
 
 def get_latest_rating(
@@ -1100,7 +1248,12 @@ def build_profile_text(
     user,
     rating=None
 ):
+    rank = user.get("rank", "Новичок")
+    rank_emoji = RANK_EMOJIS.get(rank, "🧑‍🎓")
+
     text = (
+        f"{rank_emoji} **{rank}**\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"👤 **Анкета** · {user['age']} лет\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📏 {user['height']} см   "
@@ -1129,7 +1282,12 @@ def show_rating_card(
     uid,
     target
 ):
+    rank = target.get("rank", "Новичок")
+    rank_emoji = RANK_EMOJIS.get(rank, "🧑‍🎓")
+
     text = (
+        f"{rank_emoji} **{rank}**\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"👤 **Анкета** · {target['age']} лет\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📏 {target['height']} см   "
@@ -1141,15 +1299,23 @@ def show_rating_card(
         f"💖 **Оцени внешность:**"
     )
 
+    kb = rating_kb(
+        target["gender"],
+        target["id"]
+    )
+    kb.add(
+        InlineKeyboardButton(
+            "📊 Что значит эта оценка?",
+            callback_data=f"meaning_{target['gender']}"
+        )
+    )
+
     if target.get("photo_id"):
         bot.send_photo(
             uid,
             target["photo_id"],
             caption=text,
-            reply_markup=rating_kb(
-                target["gender"],
-                target["id"]
-            ),
+            reply_markup=kb,
             parse_mode="Markdown"
         )
 
@@ -1157,10 +1323,7 @@ def show_rating_card(
         bot.send_message(
             uid,
             text,
-            reply_markup=rating_kb(
-                target["gender"],
-                target["id"]
-            ),
+            reply_markup=kb,
             parse_mode="Markdown"
         )
 
@@ -1877,7 +2040,8 @@ def set_gender(c):
     update_user(
         uid,
         gender=gender,
-        registered=True
+        registered=True,
+        rank="Новичок"
     )
 
     bot.answer_callback_query(
@@ -1919,6 +2083,15 @@ def rate_menu(uid):
         )
 
         return
+
+    update_user(
+        uid,
+        views_count=user.get("views_count", 0) + 1
+    )
+
+    rank = get_rank(user)
+    if rank != user.get("rank"):
+        update_user(uid, rank=rank)
 
     skipped = skipped_profiles.get(
         uid,
@@ -2030,6 +2203,31 @@ def set_rating(c):
         pass
 
     rate_menu(uid)
+
+
+# =========================================================
+# RATING MEANING
+# =========================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("meaning_")
+)
+def rating_meaning(c):
+    gender = c.data.split("_")[1]
+    scale = get_scale(gender)
+    text = "📊 **Расшифровка шкалы оценок:**\n\n"
+
+    for rating in scale:
+        emoji = SCALE_EMOJIS.get(rating, "⭐")
+        meaning = RATING_MEANINGS.get(rating, "Нет описания")
+        text += f"{emoji} **{rating}** — {meaning}\n\n"
+
+    bot.send_message(
+        c.from_user.id,
+        text,
+        parse_mode="Markdown"
+    )
+    bot.answer_callback_query(c.id)
 
 
 # =========================================================
@@ -2231,20 +2429,35 @@ def show_profile(m):
 
         return
 
+    rank = user.get("rank", "Новичок")
+    rank_emoji = RANK_EMOJIS.get(rank, "🧑‍🎓")
+
     emoji = (
         "👨"
         if user["gender"] == "male"
         else "👩"
     )
 
+    place, total = get_user_place(uid)
+
     text = (
-        f"{emoji} **Моя анкета**\n\n"
+        f"{emoji} **Моя анкета**\n"
+        f"{rank_emoji} **Звание:** {rank}\n\n"
         f"📅 {user['age']} лет\n"
         f"📏 {user['height']} см\n"
         f"⚖️ {user['weight']} кг\n"
         f"🏙️ {user['city']}\n"
-        f"📝 _{user['bio']}_"
+        f"📝 _{user['bio']}_\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"⭐ Рейтинг: {user['rating']}\n"
     )
+
+    if place:
+        text += f"🏆 Место в топе: {place} из {total}\n"
+
+    daily_bonus = user.get("daily_bonus_count", 0)
+    if daily_bonus > 0:
+        text += f"🔥 Ежедневный бонус: {daily_bonus} оценок сегодня\n"
 
     if user.get("photo_id"):
         bot.send_photo(
@@ -2254,7 +2467,6 @@ def show_profile(m):
             reply_markup=main_menu(),
             parse_mode="Markdown"
         )
-
     else:
         bot.send_message(
             uid,
@@ -2465,7 +2677,8 @@ def show_top(m):
         SELECT
             u.username,
             u.gender,
-            COUNT(r.id) AS count
+            COUNT(r.id) AS count,
+            u.rank
 
         FROM users u
 
@@ -2510,9 +2723,15 @@ def show_top(m):
             else "👩"
         )
 
+        rank_emoji = RANK_EMOJIS.get(
+            user["rank"],
+            "🧑‍🎓"
+        )
+
         text += (
             f"{i}. {emoji} "
-            f"@{user['username']} — "
+            f"@{user['username']} "
+            f"{rank_emoji} — "
             f"{user['count']} 🌟\n"
         )
 
@@ -2935,3 +3154,6 @@ print("🚀 БОТ ЗАПУЩЕН!")
 bot.infinity_polling(
     skip_pending=True
 )
+
+
+#
