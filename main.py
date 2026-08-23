@@ -332,12 +332,15 @@ def main_menu():
 def rating_kb(gender, target_id):
     kb = InlineKeyboardMarkup(row_width=2)
 
+    # Кнопки "Письмо" и "Познакомиться"
     kb.row(
         InlineKeyboardButton("💌 Письмо", callback_data=f"msg_{target_id}"),
         InlineKeyboardButton("🤝 Познакомиться", callback_data=f"askuser_{target_id}")
     )
 
     scale = get_scale(gender)
+
+    # Оценки по 2 в ряд
     for i in range(0, len(scale), 2):
         pair = scale[i:i+2]
         kb.row(*[
@@ -348,10 +351,12 @@ def rating_kb(gender, target_id):
             for r in pair
         ])
 
+    # Кнопки "Пропустить" и "Жалоба"
     kb.row(
         InlineKeyboardButton("⏭️ Пропустить", callback_data=f"skip_{target_id}"),
         InlineKeyboardButton("🚩 Жалоба", callback_data=f"report_{target_id}")
     )
+
     return kb
 
 
@@ -1152,16 +1157,20 @@ def set_gender(c):
 
 def rate_menu(uid):
     user = get_user(uid)
+
     if not user or not user.get("registered"):
         bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
         return
 
+    # Обновляем счётчик просмотров
     update_user(uid, views_count=user.get("views_count", 0) + 1)
 
+    # Обновляем звание
     rank = get_rank(user)
     if rank != user.get("rank"):
         update_user(uid, rank=rank)
 
+    # Пропущенные анкеты
     skipped = skipped_profiles.get(uid, set())
     target = get_random_user(uid, extra_exclude=list(skipped))
 
@@ -1169,6 +1178,7 @@ def rate_menu(uid):
         if skipped:
             skipped_profiles[uid] = set()
             target = get_random_user(uid)
+
         if not target:
             bot.send_message(
                 uid,
