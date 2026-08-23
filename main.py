@@ -411,14 +411,14 @@ def gender_kb():
 
     kb.add(
         InlineKeyboardButton(
-            "💪 ПАРЕНЬ",
+            "👨🏽‍🦱",
             callback_data="gender_male"
         )
     )
 
     kb.add(
         InlineKeyboardButton(
-            "🌸 ДЕВУШКА",
+            "👱🏽‍♀️",
             callback_data="gender_female"
         )
     )
@@ -1378,9 +1378,10 @@ def start(m):
 
         bot.send_message(
             uid,
-            "💖 **ДОБРО ПОЖАЛОВАТЬ В МОГГВИНЧИК!** 💖\n\n"
+            "❤️**ДОБРО ПОЖАЛОВАТЬ В МОГГВИНЧИК!**❤️\n\n"
             "🔥 Твоя честная оценка внешности.\n"
             "📸 Заполни анкету — и начни получать оценки.\n\n"
+            "👨‍🦳 Укажи свой возраст"
             "🚀 Доступно с 14 лет.",
             parse_mode="Markdown"
         )
