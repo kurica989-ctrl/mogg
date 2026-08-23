@@ -395,30 +395,19 @@ def rating_kb(gender, target_id):
     return kb
 
 
-def rating_meaning_kb():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton(
-            "📊 Что значит эта оценка?",
-            callback_data="show_rating_meaning"
-        )
-    )
-    return kb
-
-
 def gender_kb():
     kb = InlineKeyboardMarkup(row_width=1)
 
     kb.add(
         InlineKeyboardButton(
-            "👨🏽‍🦱",
+            "💪 ПАРЕНЬ",
             callback_data="gender_male"
         )
     )
 
     kb.add(
         InlineKeyboardButton(
-            "👱🏽‍♀️",
+            "🌸 ДЕВУШКА",
             callback_data="gender_female"
         )
     )
@@ -1303,12 +1292,6 @@ def show_rating_card(
         target["gender"],
         target["id"]
     )
-    kb.add(
-        InlineKeyboardButton(
-            "📊 Что значит эта оценка?",
-            callback_data=f"meaning_{target['gender']}"
-        )
-    )
 
     if target.get("photo_id"):
         bot.send_photo(
@@ -1378,10 +1361,9 @@ def start(m):
 
         bot.send_message(
             uid,
-            "❤️**ДОБРО ПОЖАЛОВАТЬ В МОГГВИНЧИК!**❤️\n\n"
+            "💖 **ДОБРО ПОЖАЛОВАТЬ В МОГГВИНЧИК!** 💖\n\n"
             "🔥 Твоя честная оценка внешности.\n"
             "📸 Заполни анкету — и начни получать оценки.\n\n"
-            "👨‍🦳 Укажи свой возраст"
             "🚀 Доступно с 14 лет.",
             parse_mode="Markdown"
         )
@@ -2204,31 +2186,6 @@ def set_rating(c):
         pass
 
     rate_menu(uid)
-
-
-# =========================================================
-# RATING MEANING
-# =========================================================
-
-@bot.callback_query_handler(
-    func=lambda c: c.data.startswith("meaning_")
-)
-def rating_meaning(c):
-    gender = c.data.split("_")[1]
-    scale = get_scale(gender)
-    text = "📊 **Расшифровка шкалы оценок:**\n\n"
-
-    for rating in scale:
-        emoji = SCALE_EMOJIS.get(rating, "⭐")
-        meaning = RATING_MEANINGS.get(rating, "Нет описания")
-        text += f"{emoji} **{rating}** — {meaning}\n\n"
-
-    bot.send_message(
-        c.from_user.id,
-        text,
-        parse_mode="Markdown"
-    )
-    bot.answer_callback_query(c.id)
 
 
 # =========================================================
@@ -3155,6 +3112,3 @@ print("🚀 БОТ ЗАПУЩЕН!")
 bot.infinity_polling(
     skip_pending=True
 )
-
-
-#
