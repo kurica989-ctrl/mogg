@@ -12,15 +12,14 @@ from telebot.types import (
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Пример:
-# ADMIN_IDS=123456789,987654321
+# Админы через запятую
 ADMIN_IDS = [
     int(x)
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 ]
 
-MIN_AGE = 18
+MIN_AGE = 14
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -264,7 +263,6 @@ def main_menu():
 def rating_kb(gender, target_id):
     kb = InlineKeyboardMarkup(row_width=2)
 
-    # Письмо / знакомство
     kb.row(
         InlineKeyboardButton(
             "💌 Письмо",
@@ -276,7 +274,6 @@ def rating_kb(gender, target_id):
         )
     )
 
-    # Оценки
     scale = get_scale(gender)
 
     for i in range(0, len(scale), 2):
@@ -290,7 +287,6 @@ def rating_kb(gender, target_id):
             for r in pair
         ])
 
-    # Пропустить / жалоба
     kb.row(
         InlineKeyboardButton(
             "⏭️ Пропустить",
@@ -326,11 +322,6 @@ def gender_kb():
 
 
 def rated_profile_kb(target_id):
-    """
-    Кнопки после того, как пользователь решил посмотреть
-    анкету человека, который его оценил.
-    """
-
     kb = InlineKeyboardMarkup(row_width=2)
 
     kb.row(
@@ -366,10 +357,6 @@ def rated_profile_kb(target_id):
 
 
 def reply_rating_kb(gender, target_id):
-    """
-    Шкала оценки для ответа на оценку.
-    """
-
     kb = InlineKeyboardMarkup(row_width=2)
 
     scale = get_scale(gender)
@@ -457,7 +444,6 @@ def report_reason_kb(target_id):
 
 user_states = {}
 
-# user_id -> set(profile_ids)
 skipped_profiles = {}
 
 
@@ -638,14 +624,6 @@ def has_rated(from_user, to_user):
 # =========================================================
 
 def save_rating(from_user, to_user, rating):
-    """
-    Сохраняет оценку.
-
-    ВАЖНО:
-    уведомление теперь отправляется на ЛЮБУЮ оценку,
-    а не только на HIGH_RATINGS.
-    """
-
     conn = get_db()
     cur = conn.cursor()
 
@@ -670,14 +648,12 @@ def save_rating(from_user, to_user, rating):
     cur.close()
     conn.close()
 
-    # Проверяем взаимную высокую оценку
     check_match(
         from_user,
         to_user,
         rating
     )
 
-    # Уведомляем получателя о ЛЮБОЙ оценке
     notify_about_rating(
         from_user,
         to_user,
@@ -754,8 +730,6 @@ def check_match(
     if not user1 or not user2:
         return
 
-    # Здесь username используется только внутри
-    # уведомления о мэтче. В АНКЕТЕ он не показывается.
     username1 = user1.get("username") or "пользователь"
     username2 = user2.get("username") or "пользователь"
 
@@ -787,12 +761,6 @@ def notify_about_rating(
     to_user,
     rating
 ):
-    """
-    Отправляет получателю уведомление о любой оценке.
-
-    Username здесь НЕ показываем.
-    """
-
     if from_user == to_user:
         return
 
@@ -847,11 +815,6 @@ def get_latest_rating(
 
 
 def get_user_ratings(user_id):
-    """
-    ВАЖНО:
-    username здесь специально НЕ выбирается.
-    """
-
     conn = get_db()
     cur = conn.cursor(
         cursor_factory=RealDictCursor
@@ -1137,13 +1100,6 @@ def build_profile_text(
     user,
     rating=None
 ):
-    """
-    Формирует анкету.
-
-    ВАЖНО:
-    username здесь НИКОГДА не выводится.
-    """
-
     text = (
         f"👤 **Анкета** · {user['age']} лет\n"
         f"━━━━━━━━━━━━━━━\n"
@@ -1214,12 +1170,6 @@ def show_rated_profile(
     target,
     rating
 ):
-    """
-    Показ анкеты человека, который оценил пользователя.
-
-    Username скрыт.
-    """
-
     text = build_profile_text(
         target,
         rating=rating
@@ -1265,10 +1215,10 @@ def start(m):
 
         bot.send_message(
             uid,
-            "💖 **ДОБРО ПОЖАЛОВАТЬ В MOGGVINCHIK!** 💖\n\n"
-            f"Сервис доступен только совершеннолетним "
-            f"пользователям ({MIN_AGE}+).\n\n"
-            "Сколько тебе лет?",
+            "💖 **ДОБРО ПОЖАЛОВАТЬ В МОГГВИНЧИК!** 💖\n\n"
+            "🔥 Твоя честная оценка внешности.\n"
+            "📸 Заполни анкету — и начни получать оценки.\n\n"
+            "🚀 Доступно с 14 лет.",
             parse_mode="Markdown"
         )
 
@@ -1990,8 +1940,9 @@ def rate_menu(uid):
         if not target:
             bot.send_message(
                 uid,
-                "😢 Больше некого оценивать "
-                "прямо сейчас — загляни позже.",
+                "😢 Сейчас некого оценивать — загляни позже.\n\n"
+                "👥 **Но ты можешь поделиться ботом с друзьями!**\n"
+                "📩 Присылай скрины в **Поддержку** — тебя **отблагодарят** 💎",
                 reply_markup=main_menu()
             )
 
@@ -2070,7 +2021,6 @@ def set_rating(c):
         f"✅ {emoji} {rating}"
     )
 
-    # Удаляем старую карточку, чтобы не плодить сообщения
     try:
         bot.delete_message(
             c.message.chat.id,
@@ -2079,7 +2029,6 @@ def set_rating(c):
     except Exception:
         pass
 
-    # АВТОМАТИЧЕСКИ ПЕРЕХОДИМ К СЛЕДУЮЩЕЙ
     rate_menu(uid)
 
 
@@ -2288,7 +2237,6 @@ def show_profile(m):
         else "👩"
     )
 
-    # Username здесь НЕ показываем
     text = (
         f"{emoji} **Моя анкета**\n\n"
         f"📅 {user['age']} лет\n"
@@ -2346,7 +2294,6 @@ def show_ratings(m):
             "⭐"
         )
 
-        # НИКАКИХ USERNAME
         text += (
             f"{emoji} **{rating}**\n"
         )
@@ -2485,8 +2432,6 @@ def show_matches(m):
         user = get_user(match_id)
 
         if user:
-            # Здесь можно показать username,
-            # потому что это уже взаимный мэтч.
             username = user.get(
                 "username",
                 "пользователь"
@@ -2565,8 +2510,6 @@ def show_top(m):
             else "👩"
         )
 
-        # В ТОПЕ username пока оставляем,
-        # потому что это отдельный рейтинг.
         text += (
             f"{i}. {emoji} "
             f"@{user['username']} — "
