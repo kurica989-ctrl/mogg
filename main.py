@@ -12,7 +12,7 @@ from telebot.types import (
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Comma-separated telegram user IDs of moderators/admins, e.g. "123456,789012"
+# Comma-separated Telegram user IDs of moderators/admins
 ADMIN_IDS = [
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
@@ -23,9 +23,9 @@ MIN_AGE = 18
 bot = telebot.TeleBot(TOKEN)
 
 
-# =========================================================
+# ============================================================
 # DATABASE
-# =========================================================
+# ============================================================
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -115,46 +115,25 @@ def init_db():
 init_db()
 
 
-# =========================================================
-# RATING SCALE
-# =========================================================
+# ============================================================
+# RATING SYSTEM
+# ============================================================
 
 MALE_SCALE = [
-    "Sub3",
-    "Sub5",
-    "LLTN",
-    "LTN",
-    "HLTN",
-    "LMTN",
-    "MTN",
-    "HMTN",
-    "LHTN",
-    "HTN",
-    "HHTN",
-    "CHAD LITE",
-    "TRUE ADAM"
+    "Sub3", "Sub5", "LLTN", "LTN", "HLTN", "LMTN",
+    "MTN", "HMTN", "LHTN", "HTN", "HHTN",
+    "CHAD LITE", "TRUE ADAM"
 ]
 
 FEMALE_SCALE = [
-    "Sub3",
-    "Sub5",
-    "LLTB",
-    "LTB",
-    "HLTB",
-    "LMTB",
-    "MTB",
-    "HMTB",
-    "LHTB",
-    "HTB",
-    "HHTB",
-    "Stacy",
-    "True Eve"
+    "Sub3", "Sub5", "LLTB", "LTB", "HLTB", "LMTB",
+    "MTB", "HMTB", "LHTB", "HTB", "HHTB",
+    "Stacy", "True Eve"
 ]
 
 SCALE_EMOJIS = {
     "Sub3": "😢",
     "Sub5": "😐",
-
     "LLTN": "😕",
     "LTN": "🙂",
     "HLTN": "😊",
@@ -167,9 +146,9 @@ SCALE_EMOJIS = {
     "CHAD LITE": "👑",
     "TRUE ADAM": "👨‍🦱",
 
-    "LLTB": "😕",
-    "LTB": "🙂",
-    "HLTB": "😊",
+    "LLTB": "😢",
+    "LTB": "😐",
+    "HLTB": "😕",
     "LMTB": "😄",
     "MTB": "😍",
     "HMTB": "🔥",
@@ -203,19 +182,20 @@ def get_scale(gender):
     return FEMALE_SCALE if gender == "female" else MALE_SCALE
 
 
+# ============================================================
+# ADMIN
+# ============================================================
+
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
-# =========================================================
+# ============================================================
 # KEYBOARDS
-# =========================================================
+# ============================================================
 
 def main_menu():
-    kb = ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        row_width=2
-    )
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
 
     kb.add(
         KeyboardButton("🎲 Оценить"),
@@ -241,17 +221,6 @@ def main_menu():
 
 def rating_kb(gender, target_id):
     kb = InlineKeyboardMarkup(row_width=2)
-
-    kb.row(
-        InlineKeyboardButton(
-            "💌 Письмо",
-            callback_data=f"msg_{target_id}"
-        ),
-        InlineKeyboardButton(
-            "🤝 Познакомиться",
-            callback_data=f"askuser_{target_id}"
-        )
-    )
 
     scale = get_scale(gender)
 
@@ -280,34 +249,29 @@ def rating_kb(gender, target_id):
     return kb
 
 
-def gender_kb():
-    kb = InlineKeyboardMarkup(row_width=2)
+# ВАЖНО:
+# Это клавиатура, которая показывается после высокой оценки.
+# Никакого username здесь нет.
+def rating_notification_kb(target_id):
+    kb = InlineKeyboardMarkup(row_width=1)
 
     kb.add(
         InlineKeyboardButton(
-            "💪 ПАРЕНЬ",
-            callback_data="gender_male"
-        )
-    )
-
-    kb.add(
-        InlineKeyboardButton(
-            "🌸 ДЕВУШКА",
-            callback_data="gender_female"
+            "👁️ Показать анкету",
+            callback_data=f"showprofile_{target_id}"
         )
     )
 
     return kb
 
 
-# Клавиатура уже открытой анкеты.
-# Username здесь намеренно НЕ показываем.
-def user_view_kb(user_id):
+# Клавиатура уже внутри просмотренной анкеты
+def profile_view_kb(user_id):
     kb = InlineKeyboardMarkup(row_width=1)
 
     kb.add(
         InlineKeyboardButton(
-            "💌 Письмо",
+            "💌 Написать",
             callback_data=f"msg_{user_id}"
         )
     )
@@ -323,6 +287,26 @@ def user_view_kb(user_id):
         InlineKeyboardButton(
             "🚩 Пожаловаться",
             callback_data=f"report_{user_id}"
+        )
+    )
+
+    return kb
+
+
+def gender_kb():
+    kb = InlineKeyboardMarkup(row_width=2)
+
+    kb.add(
+        InlineKeyboardButton(
+            "💪 ПАРЕНЬ",
+            callback_data="gender_male"
+        )
+    )
+
+    kb.add(
+        InlineKeyboardButton(
+            "🌸 ДЕВУШКА",
+            callback_data="gender_female"
         )
     )
 
@@ -372,9 +356,9 @@ def report_reason_kb(target_id):
     return kb
 
 
-# =========================================================
-# USER STATE
-# =========================================================
+# ============================================================
+# STATE
+# ============================================================
 
 user_states = {}
 
@@ -394,9 +378,9 @@ def clear_state(user_id):
     user_states.pop(user_id, None)
 
 
-# =========================================================
+# ============================================================
 # DATABASE HELPERS
-# =========================================================
+# ============================================================
 
 def get_user(user_id):
     conn = get_db()
@@ -419,14 +403,15 @@ def create_user(user_id, username, name):
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO users (id, username, name)
         VALUES (%s, %s, %s)
         ON CONFLICT DO NOTHING
-        """,
-        (user_id, username, name)
-    )
+    """, (
+        user_id,
+        username,
+        name
+    ))
 
     conn.commit()
     cur.close()
@@ -441,7 +426,7 @@ def update_user(user_id, **kwargs):
     cur = conn.cursor()
 
     set_clause = ", ".join(
-        [f"{k}=%s" for k in kwargs.keys()]
+        [f"{key}=%s" for key in kwargs.keys()]
     )
 
     values = list(kwargs.values()) + [user_id]
@@ -490,41 +475,34 @@ def unban_user(user_id):
     )
 
 
-# =========================================================
-# RANDOM PROFILES
-# =========================================================
-
-def get_random_user(
-    exclude_user_id,
-    extra_exclude=None
-):
+def get_random_user(exclude_user_id, extra_exclude=None):
     extra_exclude = extra_exclude or []
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT *
         FROM users
         WHERE id != %s
           AND registered = TRUE
           AND is_banned = FALSE
+
           AND id NOT IN (
               SELECT to_user
               FROM ratings
               WHERE from_user = %s
           )
+
           AND NOT (id = ANY(%s))
+
         ORDER BY RANDOM()
         LIMIT 1
-        """,
-        (
-            exclude_user_id,
-            exclude_user_id,
-            extra_exclude
-        )
-    )
+    """, (
+        exclude_user_id,
+        exclude_user_id,
+        extra_exclude
+    ))
 
     user = cur.fetchone()
 
@@ -538,34 +516,32 @@ def has_rated(from_user, to_user):
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT 1
         FROM ratings
-        WHERE from_user=%s
-          AND to_user=%s
-        """,
-        (from_user, to_user)
-    )
+        WHERE from_user=%s AND to_user=%s
+    """, (
+        from_user,
+        to_user
+    ))
 
-    row = cur.fetchone()
+    result = cur.fetchone()
 
     cur.close()
     conn.close()
 
-    return row is not None
+    return result is not None
 
 
-# =========================================================
+# ============================================================
 # RATINGS
-# =========================================================
+# ============================================================
 
 def save_rating(from_user, to_user, rating):
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO ratings (
             from_user,
             to_user,
@@ -577,13 +553,11 @@ def save_rating(from_user, to_user, rating):
         DO UPDATE SET
             rating = EXCLUDED.rating,
             created_at = CURRENT_TIMESTAMP
-        """,
-        (
-            from_user,
-            to_user,
-            rating
-        )
-    )
+    """, (
+        from_user,
+        to_user,
+        rating
+    ))
 
     conn.commit()
 
@@ -604,96 +578,71 @@ def check_match(from_user, to_user, new_rating):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT rating
         FROM ratings
         WHERE from_user=%s
           AND to_user=%s
-        """,
-        (
-            to_user,
-            from_user
-        )
-    )
+    """, (
+        to_user,
+        from_user
+    ))
 
     opposite = cur.fetchone()
 
-    if opposite and opposite["rating"] in HIGH_RATINGS:
-        cur.execute(
-            """
-            INSERT INTO matches (user1, user2)
-            VALUES (%s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            (
-                min(from_user, to_user),
-                max(from_user, to_user)
-            )
-        )
+    if not opposite:
+        cur.close()
+        conn.close()
+        return
 
-        conn.commit()
+    if opposite["rating"] not in HIGH_RATINGS:
+        cur.close()
+        conn.close()
+        return
 
-        user1 = get_user(from_user)
-        user2 = get_user(to_user)
+    cur.close()
 
-        if user1 and user2:
-            username1 = user1.get("username") or "пользователь"
-            username2 = user2.get("username") or "пользователь"
+    cur = conn.cursor()
 
-            try:
-                bot.send_message(
-                    from_user,
-                    f"❤️‍🔥 **ЛУКМЭТЧ!** ❤️‍🔥\n\n"
-                    f"Ты и @{username2} лайкнули друг друга!",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
+    cur.execute("""
+        INSERT INTO matches (user1, user2)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+    """, (
+        min(from_user, to_user),
+        max(from_user, to_user)
+    ))
 
-            try:
-                bot.send_message(
-                    to_user,
-                    f"❤️‍🔥 **ЛУКМЭТЧ!** ❤️‍🔥\n\n"
-                    f"Ты и @{username1} лайкнули друг друга!",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
+    conn.commit()
 
     cur.close()
     conn.close()
 
+    user1 = get_user(from_user)
+    user2 = get_user(to_user)
 
-def get_user_ratings(user_id):
-    conn = get_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    if not user1 or not user2:
+        return
 
-    cur.execute(
-        """
-        SELECT
-            r.rating,
-            u.username
-        FROM ratings r
-        JOIN users u
-          ON r.from_user = u.id
-        WHERE r.to_user=%s
-        ORDER BY r.created_at DESC
-        """,
-        (user_id,)
+    # Никаких username в уведомлении.
+    bot.send_message(
+        from_user,
+        "❤️‍🔥 **ЛУКМЭТЧ!** ❤️‍🔥\n\n"
+        "Вы понравились друг другу!",
+        parse_mode="Markdown"
     )
 
-    ratings = cur.fetchall()
+    bot.send_message(
+        to_user,
+        "❤️‍🔥 **ЛУКМЭТЧ!** ❤️‍🔥\n\n"
+        "Вы понравились друг другу!",
+        parse_mode="Markdown"
+    )
 
-    cur.close()
-    conn.close()
 
-    return ratings
-
-
-# =========================================================
+# ============================================================
 # MESSAGES
-# =========================================================
+# ============================================================
 
 def save_message(
     from_user,
@@ -705,8 +654,7 @@ def save_message(
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO messages (
             from_user,
             to_user,
@@ -715,15 +663,13 @@ def save_message(
             file_id
         )
         VALUES (%s, %s, %s, %s, %s)
-        """,
-        (
-            from_user,
-            to_user,
-            content,
-            msg_type,
-            file_id
-        )
-    )
+    """, (
+        from_user,
+        to_user,
+        content,
+        msg_type,
+        file_id
+    ))
 
     conn.commit()
 
@@ -735,25 +681,24 @@ def get_unread_messages(user_id):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    # Здесь намеренно берём name, а не username.
-    cur.execute(
-        """
+    cur.execute("""
         SELECT
             m.id,
             m.from_user,
             m.content,
             m.message_type,
             m.file_id,
-            u.name AS sender_name
+            u.name,
+            u.gender
         FROM messages m
         JOIN users u
-          ON m.from_user = u.id
+            ON m.from_user = u.id
         WHERE m.to_user=%s
           AND m.read=FALSE
         ORDER BY m.created_at DESC
-        """,
-        (user_id,)
-    )
+    """, (
+        user_id,
+    ))
 
     messages = cur.fetchall()
 
@@ -778,31 +723,63 @@ def mark_message_read(msg_id):
     conn.close()
 
 
-# =========================================================
+# ============================================================
+# RATINGS VIEW
+# ============================================================
+
+def get_user_ratings(user_id):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute("""
+        SELECT
+            r.rating,
+            u.id,
+            u.gender,
+            u.age,
+            u.height,
+            u.weight,
+            u.city,
+            u.bio,
+            u.photo_id
+        FROM ratings r
+        JOIN users u
+            ON r.from_user = u.id
+        WHERE r.to_user=%s
+        ORDER BY r.created_at DESC
+    """, (
+        user_id,
+    ))
+
+    ratings = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return ratings
+
+
+# ============================================================
 # MATCHES
-# =========================================================
+# ============================================================
 
 def get_matches(user_id):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT
             CASE
                 WHEN user1=%s THEN user2
                 ELSE user1
             END AS matched_user
         FROM matches
-        WHERE user1=%s
-           OR user2=%s
-        """,
-        (
-            user_id,
-            user_id,
-            user_id
-        )
-    )
+        WHERE user1=%s OR user2=%s
+    """, (
+        user_id,
+        user_id,
+        user_id
+    ))
 
     matches = cur.fetchall()
 
@@ -815,20 +792,15 @@ def get_matches(user_id):
     ]
 
 
-# =========================================================
+# ============================================================
 # REPORTS
-# =========================================================
+# ============================================================
 
-def save_report(
-    from_user,
-    target_user,
-    reason
-):
+def save_report(from_user, target_user, reason):
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO reports (
             from_user,
             target_user,
@@ -836,13 +808,11 @@ def save_report(
         )
         VALUES (%s, %s, %s)
         RETURNING id
-        """,
-        (
-            from_user,
-            target_user,
-            reason
-        )
-    )
+    """, (
+        from_user,
+        target_user,
+        reason
+    ))
 
     report_id = cur.fetchone()[0]
 
@@ -858,23 +828,21 @@ def get_open_reports():
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT
             rp.id,
             rp.from_user,
             rp.target_user,
             rp.reason,
             rp.created_at,
-            u.username AS target_username
+            u.name AS target_name
         FROM reports rp
         JOIN users u
-          ON rp.target_user = u.id
-        WHERE rp.status = 'open'
+            ON rp.target_user = u.id
+        WHERE rp.status='open'
         ORDER BY rp.created_at DESC
         LIMIT 20
-        """
-    )
+    """)
 
     reports = cur.fetchall()
 
@@ -899,10 +867,7 @@ def close_report(report_id):
     conn.close()
 
 
-def notify_admins(
-    text,
-    reply_markup=None
-):
+def notify_admins(text, reply_markup=None):
     for admin_id in ADMIN_IDS:
         try:
             bot.send_message(
@@ -915,9 +880,98 @@ def notify_admins(
             pass
 
 
-# =========================================================
-# REGISTRATION
-# =========================================================
+# ============================================================
+# ANONYMOUS PROFILE
+# ============================================================
+
+def gender_text(gender):
+    if gender == "male":
+        return "👨 Парень"
+    return "👩 Девушка"
+
+
+def profile_text(user, show_rating=False):
+    """
+    Публичная анкета.
+
+    ВАЖНО:
+    Здесь НИКОГДА не выводится username.
+    """
+
+    text = (
+        f"{gender_text(user['gender'])}"
+        f" · {user['age']} лет\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📏 {user['height']} см   "
+        f"⚖️ {user['weight']} кг\n"
+        f"🏙️ {user['city']}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📝 _{user['bio']}_"
+    )
+
+    if show_rating:
+        text += "\n━━━━━━━━━━━━━━━\n💖 Тебя высоко оценили"
+
+    return text
+
+
+def show_public_profile(
+    viewer_id,
+    target,
+    show_actions=True,
+    show_rating=False
+):
+    """
+    Показывает анкету без username.
+    """
+
+    if not target:
+        bot.send_message(
+            viewer_id,
+            "❌ Анкета больше недоступна."
+        )
+        return
+
+    text = profile_text(
+        target,
+        show_rating=show_rating
+    )
+
+    if target.get("photo_id"):
+        if show_actions:
+            bot.send_photo(
+                viewer_id,
+                target["photo_id"],
+                caption=text,
+                reply_markup=profile_view_kb(target["id"]),
+                parse_mode="Markdown"
+            )
+        else:
+            bot.send_photo(
+                viewer_id,
+                target["photo_id"],
+                caption=text,
+                parse_mode="Markdown"
+            )
+    else:
+        if show_actions:
+            bot.send_message(
+                viewer_id,
+                text,
+                reply_markup=profile_view_kb(target["id"]),
+                parse_mode="Markdown"
+            )
+        else:
+            bot.send_message(
+                viewer_id,
+                text,
+                parse_mode="Markdown"
+            )
+
+
+# ============================================================
+# START / REGISTRATION
+# ============================================================
 
 @bot.message_handler(commands=["start"])
 def start(m):
@@ -953,14 +1007,16 @@ def start(m):
                 else ""
             )
         )
+
         return
 
     if user.get("registered"):
         bot.send_message(
             uid,
-            f"✨ С возвращением, @{user['username']}!",
+            "✨ С возвращением!",
             reply_markup=main_menu()
         )
+
     else:
         bot.send_message(
             uid,
@@ -969,9 +1025,9 @@ def start(m):
         )
 
 
-# =========================================================
+# ============================================================
 # ADMIN
-# =========================================================
+# ============================================================
 
 @bot.message_handler(commands=["admin"])
 def admin_panel(m):
@@ -989,32 +1045,26 @@ def admin_panel(m):
         )
         return
 
-    for report in reports:
+    for r in reports:
         kb = InlineKeyboardMarkup(row_width=2)
 
         kb.add(
             InlineKeyboardButton(
                 "⛔ Забанить",
-                callback_data=(
-                    f"adminban_"
-                    f"{report['target_user']}_"
-                    f"{report['id']}"
-                )
+                callback_data=f"adminban_{r['target_user']}_{r['id']}"
             ),
             InlineKeyboardButton(
                 "✅ Отклонить",
-                callback_data=(
-                    f"admindismiss_{report['id']}"
-                )
+                callback_data=f"admindismiss_{r['id']}"
             )
         )
 
         bot.send_message(
             uid,
-            f"🚩 Жалоба #{report['id']}\n"
-            f"На: @{report['target_username']} "
-            f"(id {report['target_user']})\n"
-            f"Причина: {report['reason']}",
+            f"🚩 Жалоба #{r['id']}\n"
+            f"На: {r['target_name']} "
+            f"(id {r['target_user']})\n"
+            f"Причина: {r['reason']}",
             reply_markup=kb
         )
 
@@ -1026,9 +1076,7 @@ def cmd_ban(m):
     if not is_admin(uid):
         return
 
-    parts = m.text.split(
-        maxsplit=2
-    )
+    parts = m.text.split(maxsplit=2)
 
     if len(parts) < 2 or not parts[1].isdigit():
         bot.send_message(
@@ -1038,16 +1086,9 @@ def cmd_ban(m):
         return
 
     target_id = int(parts[1])
-    reason = (
-        parts[2]
-        if len(parts) > 2
-        else ""
-    )
+    reason = parts[2] if len(parts) > 2 else ""
 
-    ban_user(
-        target_id,
-        reason
-    )
+    ban_user(target_id, reason)
 
     bot.send_message(
         uid,
@@ -1075,9 +1116,7 @@ def cmd_unban(m):
     if not is_admin(uid):
         return
 
-    parts = m.text.split(
-        maxsplit=1
-    )
+    parts = m.text.split(maxsplit=1)
 
     if len(parts) < 2 or not parts[1].isdigit():
         bot.send_message(
@@ -1096,9 +1135,9 @@ def cmd_unban(m):
     )
 
 
-# =========================================================
+# ============================================================
 # TEXT HANDLER
-# =========================================================
+# ============================================================
 
 @bot.message_handler(
     func=lambda m: True,
@@ -1120,18 +1159,19 @@ def handle_text(m):
         )
         return
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # REGISTRATION
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
     if not user.get("age") and m.text.isdigit():
+
         age = int(m.text)
 
         if age < MIN_AGE:
             bot.send_message(
                 uid,
                 f"❌ Сервис доступен только пользователям "
-                f"{MIN_AGE}+. Регистрация невозможна."
+                f"{MIN_AGE}+."
             )
             return
 
@@ -1142,19 +1182,18 @@ def handle_text(m):
             )
             return
 
-        update_user(
-            uid,
-            age=age
-        )
+        update_user(uid, age=age)
 
         bot.send_message(
             uid,
-            "📏 Твой рост? (см, число от 100 до 250)"
+            "📏 Твой рост? "
+            "(см, число от 100 до 250)"
         )
 
         return
 
     if user.get("age") and not user.get("height"):
+
         if (
             not m.text.isdigit()
             or not (100 <= int(m.text) <= 250)
@@ -1172,12 +1211,14 @@ def handle_text(m):
 
         bot.send_message(
             uid,
-            "⚖️ Твой вес? (кг, число от 30 до 250)"
+            "⚖️ Твой вес? "
+            "(кг, число от 30 до 250)"
         )
 
         return
 
     if user.get("height") and not user.get("weight"):
+
         if (
             not m.text.isdigit()
             or not (30 <= int(m.text) <= 250)
@@ -1201,6 +1242,7 @@ def handle_text(m):
         return
 
     if user.get("weight") and not user.get("city"):
+
         update_user(
             uid,
             city=m.text[:50]
@@ -1208,12 +1250,14 @@ def handle_text(m):
 
         bot.send_message(
             uid,
-            "📝 Напиши о себе (макс 200 символов)"
+            "📝 Напиши о себе "
+            "(макс 200 символов)"
         )
 
         return
 
     if user.get("city") and not user.get("bio"):
+
         update_user(
             uid,
             bio=m.text[:200]
@@ -1226,11 +1270,12 @@ def handle_text(m):
 
         return
 
-    # -----------------------------------------------------
-    # OTHER REPORT
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # REPORT OTHER
+    # --------------------------------------------------------
 
     if state.get("action") == "reporting_other":
+
         target_id = state.get("target_id")
 
         save_report(
@@ -1247,22 +1292,22 @@ def handle_text(m):
 
         notify_admins(
             f"🚩 Новая жалоба на пользователя "
-            f"id {target_id}:\n"
-            f"{m.text[:300]}"
+            f"id {target_id}:\n{m.text[:300]}"
         )
 
         clear_state(uid)
 
         return
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # SEND TEXT MESSAGE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
     if (
         state.get("action") == "sending_message"
         and state.get("msg_type") == "text"
     ):
+
         target_id = state.get("target_id")
 
         save_message(
@@ -1277,17 +1322,20 @@ def handle_text(m):
         clear_state(uid)
 
         if target:
+
             bot.send_message(
                 uid,
-                "✅ Письмо отправлено! "
-                "Теперь оцени анкету 👇"
+                "✅ Письмо отправлено!"
             )
 
-            show_rating_card(
+            show_public_profile(
                 uid,
-                target
+                target,
+                show_actions=True
             )
+
         else:
+
             bot.send_message(
                 uid,
                 "✅ Письмо отправлено!",
@@ -1296,12 +1344,14 @@ def handle_text(m):
 
         return
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # DELETE PROFILE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
     if state.get("action") == "confirm_delete":
+
         if m.text.lower() == "да":
+
             delete_user(uid)
 
             bot.send_message(
@@ -1312,6 +1362,7 @@ def handle_text(m):
             clear_state(uid)
 
         elif m.text.lower() == "нет":
+
             bot.send_message(
                 uid,
                 "✅ Отмена",
@@ -1322,9 +1373,9 @@ def handle_text(m):
 
         return
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # MAIN MENU
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
     if m.text == "🎲 Оценить":
         rate_menu(uid)
@@ -1351,6 +1402,7 @@ def handle_text(m):
         read_messages(m)
 
     elif m.text == "⬅️ Назад":
+
         bot.send_message(
             uid,
             "Главное меню",
@@ -1358,9 +1410,9 @@ def handle_text(m):
         )
 
 
-# =========================================================
+# ============================================================
 # PHOTO
-# =========================================================
+# ============================================================
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(m):
@@ -1373,6 +1425,7 @@ def handle_photo(m):
         and user.get("city")
         and not user.get("photo_id")
     ):
+
         update_user(
             uid,
             photo_id=m.photo[-1].file_id
@@ -1385,19 +1438,21 @@ def handle_photo(m):
         )
 
 
-# =========================================================
+# ============================================================
 # VOICE
-# =========================================================
+# ============================================================
 
 @bot.message_handler(content_types=["voice"])
 def handle_voice(m):
     uid = m.chat.id
+
     state = get_state(uid)
 
     if (
         state.get("action") == "sending_message"
         and state.get("msg_type") == "voice"
     ):
+
         target_id = state.get("target_id")
 
         save_message(
@@ -1413,18 +1468,20 @@ def handle_voice(m):
         clear_state(uid)
 
         if target:
+
             bot.send_message(
                 uid,
-                "✅ Голосовое письмо отправлено! "
-                "Теперь оцени анкету 👇"
+                "✅ Голосовое письмо отправлено!"
             )
 
-            show_rating_card(
+            show_public_profile(
                 uid,
-                target
+                target,
+                show_actions=True
             )
 
         else:
+
             bot.send_message(
                 uid,
                 "✅ Голосовое письмо отправлено!",
@@ -1432,19 +1489,21 @@ def handle_voice(m):
             )
 
 
-# =========================================================
-# VIDEO NOTE / CIRCLE
-# =========================================================
+# ============================================================
+# VIDEO NOTE
+# ============================================================
 
 @bot.message_handler(content_types=["video_note"])
 def handle_circle(m):
     uid = m.chat.id
+
     state = get_state(uid)
 
     if (
         state.get("action") == "sending_message"
         and state.get("msg_type") == "circle"
     ):
+
         target_id = state.get("target_id")
 
         save_message(
@@ -1460,18 +1519,20 @@ def handle_circle(m):
         clear_state(uid)
 
         if target:
+
             bot.send_message(
                 uid,
-                "✅ Кружок отправлен! "
-                "Теперь оцени анкету 👇"
+                "✅ Кружок отправлен!"
             )
 
-            show_rating_card(
+            show_public_profile(
                 uid,
-                target
+                target,
+                show_actions=True
             )
 
         else:
+
             bot.send_message(
                 uid,
                 "✅ Кружок отправлен!",
@@ -1479,9 +1540,9 @@ def handle_circle(m):
             )
 
 
-# =========================================================
+# ============================================================
 # GENDER
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("gender_")
@@ -1515,14 +1576,15 @@ def set_gender(c):
     )
 
 
-# =========================================================
+# ============================================================
 # RATING CARD
-# =========================================================
+# ============================================================
 
 def show_rating_card(uid, target):
+
     text = (
-        f"👤 **@{target['username']}**  ·  "
-        f"{target['age']} лет\n"
+        f"{gender_text(target['gender'])}"
+        f" · {target['age']} лет\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📏 {target['height']} см   "
         f"⚖️ {target['weight']} кг\n"
@@ -1533,7 +1595,9 @@ def show_rating_card(uid, target):
         f"💖 **Оцени внешность:**"
     )
 
+    # В этой карточке username тоже НЕТ.
     if target.get("photo_id"):
+
         bot.send_photo(
             uid,
             target["photo_id"],
@@ -1546,6 +1610,7 @@ def show_rating_card(uid, target):
         )
 
     else:
+
         bot.send_message(
             uid,
             text,
@@ -1557,63 +1622,24 @@ def show_rating_card(uid, target):
         )
 
 
-# =========================================================
-# ANONYMOUS / PUBLIC PROFILE
-# =========================================================
-
-def show_public_profile(viewer_id, target):
-    """
-    Показываем анкету без username.
-    Username пользователь сможет получить только
-    через отдельное действие "Познакомиться".
-    """
-
-    text = (
-        f"👤 **Анкета пользователя**  ·  "
-        f"{target['age']} лет\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📏 {target['height']} см   "
-        f"⚖️ {target['weight']} кг\n"
-        f"🏙️ {target['city']}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📝 _{target['bio']}_\n"
-        f"━━━━━━━━━━━━━━━"
-    )
-
-    if target.get("photo_id"):
-        bot.send_photo(
-            viewer_id,
-            target["photo_id"],
-            caption=text,
-            reply_markup=user_view_kb(
-                target["id"]
-            ),
-            parse_mode="Markdown"
-        )
-
-    else:
-        bot.send_message(
-            viewer_id,
-            text,
-            reply_markup=user_view_kb(
-                target["id"]
-            ),
-            parse_mode="Markdown"
-        )
-
-
-# =========================================================
+# ============================================================
 # RATE MENU
-# =========================================================
+# ============================================================
 
 def rate_menu(uid):
+
     user = get_user(uid)
 
-    if not user or not user.get("registered"):
+    if (
+        not user
+        or not user.get("registered")
+    ):
+
         bot.send_message(
             uid,
             "❌ Завершите регистрацию (/start)"
         )
+
         return
 
     skipped = skipped_profiles.get(
@@ -1627,20 +1653,22 @@ def rate_menu(uid):
     )
 
     if not target:
-        # Если все доступные анкеты были пропущены,
-        # очищаем список пропущенных и пробуем снова.
+
         if skipped:
+
             skipped_profiles[uid] = set()
 
             target = get_random_user(uid)
 
         if not target:
+
             bot.send_message(
                 uid,
-                "😢 Больше некого оценивать "
-                "прямо сейчас — загляни позже",
+                "😢 Больше некого оценивать прямо сейчас — "
+                "загляни позже",
                 reply_markup=main_menu()
             )
+
             return
 
     show_rating_card(
@@ -1649,31 +1677,29 @@ def rate_menu(uid):
     )
 
 
-# =========================================================
+# ============================================================
 # RATING CALLBACK
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("rate_")
 )
 def set_rating(c):
-    parts = c.data.split(
-        "_",
-        2
-    )
+
+    parts = c.data.split("_", 2)
 
     target_id = int(parts[1])
     rating = parts[2]
+
     uid = c.from_user.id
 
-    if has_rated(
-        uid,
-        target_id
-    ):
+    if has_rated(uid, target_id):
+
         bot.answer_callback_query(
             c.id,
             "Ты уже оценивал(-а) этого пользователя"
         )
+
         return
 
     save_rating(
@@ -1692,78 +1718,78 @@ def set_rating(c):
         f"✅ {emoji} {rating}"
     )
 
-    # -----------------------------------------------------
-    # УВЕДОМЛЕНИЕ О ЛЮБОЙ ОЦЕНКЕ
+    # --------------------------------------------------------
+    # HIGH RATING NOTIFICATION
     #
-    # Username здесь специально НЕ показывается.
-    # -----------------------------------------------------
+    # НИКАКОГО USERNAME.
+    # --------------------------------------------------------
 
-    target = get_user(target_id)
-    rater = get_user(uid)
+    if rating in HIGH_RATINGS:
 
-    if target and rater:
-        notification_text = (
-            f"{emoji} **Тебя оценили!**\n\n"
-            f"Оценка: **{rating}**\n\n"
-            f"👁️ Хочешь посмотреть анкету?"
+        bot.send_message(
+            target_id,
+            f"{emoji} **Тебя высоко оценили!**\n\n"
+            f"Хочешь посмотреть анкету?",
+            reply_markup=rating_notification_kb(uid),
+            parse_mode="Markdown"
         )
 
-        keyboard = InlineKeyboardMarkup()
-
-        keyboard.add(
-            InlineKeyboardButton(
-                "👁️ Показать анкету",
-                callback_data=f"showuser_{uid}"
-            )
-        )
-
-        # Если у оценившего есть фото,
-        # оно показывается вместе с уведомлением.
-        if rater.get("photo_id"):
-            try:
-                bot.send_photo(
-                    target_id,
-                    rater["photo_id"],
-                    caption=notification_text,
-                    reply_markup=keyboard,
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                # Если по какой-то причине фото не отправилось,
-                # отправляем обычное текстовое уведомление.
-                try:
-                    bot.send_message(
-                        target_id,
-                        notification_text,
-                        reply_markup=keyboard,
-                        parse_mode="Markdown"
-                    )
-                except Exception:
-                    pass
-
-        else:
-            try:
-                bot.send_message(
-                    target_id,
-                    notification_text,
-                    reply_markup=keyboard,
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-
-    # Автоматически показываем следующую анкету.
+    # Следующая анкета
     rate_menu(uid)
 
 
-# =========================================================
+# ============================================================
+# SHOW PROFILE CALLBACK
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("showprofile_")
+)
+def show_profile_from_notification(c):
+
+    uid = c.from_user.id
+
+    target_id = int(
+        c.data.split("_")[1]
+    )
+
+    target = get_user(target_id)
+
+    if not target or not target.get("registered"):
+        bot.answer_callback_query(
+            c.id,
+            "Анкета больше недоступна."
+        )
+        return
+
+    if target.get("is_banned"):
+        bot.answer_callback_query(
+            c.id,
+            "Анкета недоступна."
+        )
+        return
+
+    bot.answer_callback_query(
+        c.id
+    )
+
+    show_public_profile(
+        uid,
+        target,
+        show_actions=True,
+        show_rating=True
+    )
+
+
+# ============================================================
 # SKIP
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("skip_")
 )
 def handle_skip(c):
+
     uid = c.from_user.id
 
     target_id = int(
@@ -1783,20 +1809,26 @@ def handle_skip(c):
     rate_menu(uid)
 
 
-# =========================================================
-# SHOW PROFILE
-# =========================================================
+# ============================================================
+# MY PROFILE
+# ============================================================
 
 def show_profile(m):
+
     uid = m.chat.id
 
     user = get_user(uid)
 
-    if not user or not user.get("registered"):
+    if (
+        not user
+        or not user.get("registered")
+    ):
+
         bot.send_message(
             uid,
             "❌ Завершите регистрацию"
         )
+
         return
 
     emoji = (
@@ -1805,8 +1837,9 @@ def show_profile(m):
         else "👩"
     )
 
+    # Свой username можно показывать самому пользователю.
     text = (
-        f"{emoji} **@{user['username']}**\n\n"
+        f"{emoji} **Моя анкета**\n\n"
         f"📅 {user['age']} лет\n"
         f"📏 {user['height']} см\n"
         f"⚖️ {user['weight']} кг\n"
@@ -1815,6 +1848,7 @@ def show_profile(m):
     )
 
     if user.get("photo_id"):
+
         bot.send_photo(
             uid,
             user["photo_id"],
@@ -1824,6 +1858,7 @@ def show_profile(m):
         )
 
     else:
+
         bot.send_message(
             uid,
             text,
@@ -1832,63 +1867,51 @@ def show_profile(m):
         )
 
 
-# =========================================================
+# ============================================================
 # MY RATINGS
-# =========================================================
+# ============================================================
 
 def show_ratings(m):
+
     uid = m.chat.id
 
     ratings = get_user_ratings(uid)
 
     if not ratings:
+
         bot.send_message(
             uid,
             "📊 Пока никто не оценил тебя 😞",
             reply_markup=main_menu()
         )
+
         return
 
-    user = get_user(uid)
+    text = "💕 **Кто тебя оценил:**\n\n"
 
-    if not user:
-        return
+    for r in ratings:
 
-    # Считаем количество каждой оценки.
-    counts = {}
-
-    for rating_data in ratings:
-        rating = rating_data["rating"]
-
-        counts[rating] = (
-            counts.get(rating, 0) + 1
+        emoji = SCALE_EMOJIS.get(
+            r["rating"],
+            "⭐"
         )
 
-    scale = get_scale(
-        user["gender"]
-    )
+        # Анонимно.
+        # Username здесь намеренно отсутствует.
 
-    text = "💕 **ТВОИ ОЦЕНКИ:**\n\n"
-
-    # Показываем оценки в порядке шкалы.
-    for rating in scale:
-        if rating in counts:
-            emoji = SCALE_EMOJIS.get(
-                rating,
-                "⭐"
-            )
-
-            count = counts[rating]
+        if r["rating"] in HIGH_RATINGS:
 
             text += (
-                f"{emoji} **{rating}** — "
-                f"{count}\n"
+                f"{emoji} **Высокая оценка** — "
+                f"{r['rating']}\n"
             )
 
-    text += (
-        f"\n📊 Всего оценок: "
-        f"**{len(ratings)}**"
-    )
+        else:
+
+            text += (
+                f"{emoji} Анонимная оценка — "
+                f"{r['rating']}\n"
+            )
 
     bot.send_message(
         uid,
@@ -1898,21 +1921,24 @@ def show_ratings(m):
     )
 
 
-# =========================================================
-# MESSAGES LIST
-# =========================================================
+# ============================================================
+# MESSAGES
+# ============================================================
 
 def show_messages(m):
+
     uid = m.chat.id
 
     messages = get_unread_messages(uid)
 
     if not messages:
+
         bot.send_message(
             uid,
             "📬 Нет новых писем",
             reply_markup=main_menu()
         )
+
         return
 
     text = (
@@ -1921,13 +1947,15 @@ def show_messages(m):
     )
 
     for msg in messages:
-        sender_name = (
-            msg["sender_name"]
-            or "Пользователь"
+
+        gender = (
+            "👨"
+            if msg["gender"] == "male"
+            else "👩"
         )
 
         text += (
-            f"📨 От **{sender_name}**\n"
+            f"{gender} Новое письмо\n"
         )
 
     kb = ReplyKeyboardMarkup(
@@ -1935,12 +1963,8 @@ def show_messages(m):
     )
 
     kb.add(
-        KeyboardButton(
-            "📬 Прочитать письма"
-        ),
-        KeyboardButton(
-            "⬅️ Назад"
-        )
+        KeyboardButton("📬 Прочитать письма"),
+        KeyboardButton("⬅️ Назад")
     )
 
     bot.send_message(
@@ -1951,45 +1975,43 @@ def show_messages(m):
     )
 
 
-# =========================================================
-# READ MESSAGES
-# =========================================================
-
 def read_messages(m):
+
     uid = m.chat.id
 
     messages = get_unread_messages(uid)
 
     if not messages:
+
         bot.send_message(
             uid,
             "📬 Нет новых писем",
             reply_markup=main_menu()
         )
+
         return
 
     for msg in messages:
-        sender_name = (
-            msg["sender_name"]
-            or "Пользователь"
-        )
 
         if msg["message_type"] == "text":
+
             bot.send_message(
                 uid,
-                f"💌 **От {sender_name}:**\n\n"
+                f"💌 **Новое письмо:**\n\n"
                 f"{msg['content']}",
                 parse_mode="Markdown"
             )
 
         elif msg["message_type"] == "voice":
+
             bot.send_voice(
                 uid,
                 msg["file_id"],
-                caption=f"🎤 От {sender_name}"
+                caption="🎤 Новое голосовое письмо"
             )
 
         elif msg["message_type"] == "circle":
+
             bot.send_video_note(
                 uid,
                 msg["file_id"]
@@ -2006,21 +2028,24 @@ def read_messages(m):
     )
 
 
-# =========================================================
+# ============================================================
 # MATCHES
-# =========================================================
+# ============================================================
 
 def show_matches(m):
+
     uid = m.chat.id
 
     matches = get_matches(uid)
 
     if not matches:
+
         bot.send_message(
             uid,
             "❤️‍🔥 Мэтчей нет, но они появятся! 😊",
             reply_markup=main_menu()
         )
+
         return
 
     text = (
@@ -2028,23 +2053,27 @@ def show_matches(m):
     )
 
     for match_id in matches:
+
         user = get_user(match_id)
 
-        if user:
-            name = (
-                user.get("name")
-                or "Пользователь"
-            )
+        if not user:
+            continue
 
-            username = (
-                user.get("username")
-                or "без username"
-            )
+        gender = (
+            "👨"
+            if user["gender"] == "male"
+            else "👩"
+        )
 
-            text += (
-                f"👥 **{name}** "
-                f"(@{username})\n"
-            )
+        text += (
+            f"{gender} {user['age']} лет · "
+            f"{user['city']}\n"
+        )
+
+    text += (
+        "\n💡 Контакт пользователя не показывается "
+        "автоматически."
+    )
 
     bot.send_message(
         uid,
@@ -2054,11 +2083,12 @@ def show_matches(m):
     )
 
 
-# =========================================================
+# ============================================================
 # TOP
-# =========================================================
+# ============================================================
 
 def show_top(m):
+
     uid = m.chat.id
 
     conn = get_db()
@@ -2066,22 +2096,21 @@ def show_top(m):
         cursor_factory=RealDictCursor
     )
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT
-            u.username,
+            u.id,
             u.gender,
+            u.age,
             COUNT(r.id) AS count
         FROM users u
         LEFT JOIN ratings r
-          ON r.to_user = u.id
-        WHERE u.registered = TRUE
-          AND u.is_banned = FALSE
+            ON r.to_user = u.id
+        WHERE u.registered=TRUE
+          AND u.is_banned=FALSE
         GROUP BY u.id
         ORDER BY count DESC
         LIMIT 20
-        """
-    )
+    """)
 
     top_users = cur.fetchall()
 
@@ -2089,31 +2118,34 @@ def show_top(m):
     conn.close()
 
     if not top_users:
+
         bot.send_message(
             uid,
             "🏆 Пока нет оценок",
             reply_markup=main_menu()
         )
+
         return
 
     text = (
         "🏆 **ТОП МОГГВИНЧИК:**\n\n"
     )
 
-    for i, user in enumerate(
+    for i, u in enumerate(
         top_users,
         1
     ):
+
         em = (
             "👨"
-            if user["gender"] == "male"
+            if u["gender"] == "male"
             else "👩"
         )
 
         text += (
             f"{i}. {em} "
-            f"@{user['username']} — "
-            f"{user['count']} 🌟\n"
+            f"{u['age']} лет — "
+            f"{u['count']} 🌟\n"
         )
 
     bot.send_message(
@@ -2124,11 +2156,12 @@ def show_top(m):
     )
 
 
-# =========================================================
-# DELETE PROFILE
-# =========================================================
+# ============================================================
+# DELETE
+# ============================================================
 
 def confirm_delete(m):
+
     uid = m.chat.id
 
     set_state(
@@ -2142,51 +2175,15 @@ def confirm_delete(m):
     )
 
 
-# =========================================================
-# SHOW PROFILE FROM NOTIFICATION
-# =========================================================
-
-@bot.callback_query_handler(
-    func=lambda c: c.data.startswith("showuser_")
-)
-def handle_show_user(c):
-    uid = c.from_user.id
-
-    target_id = int(
-        c.data.split("_")[1]
-    )
-
-    target = get_user(target_id)
-
-    if (
-        not target
-        or not target.get("registered")
-        or target.get("is_banned")
-    ):
-        bot.answer_callback_query(
-            c.id,
-            "Анкета больше недоступна"
-        )
-        return
-
-    bot.answer_callback_query(
-        c.id
-    )
-
-    show_public_profile(
-        uid,
-        target
-    )
-
-
-# =========================================================
-# SEND MESSAGE
-# =========================================================
+# ============================================================
+# MESSAGE FLOW
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("msg_")
 )
 def handle_msg(c):
+
     uid = c.from_user.id
 
     target_id = int(
@@ -2194,10 +2191,23 @@ def handle_msg(c):
     )
 
     if target_id == uid:
+
         bot.answer_callback_query(
             c.id,
-            "Нельзя отправить письмо самому себе 😄"
+            "Нельзя написать самому себе 😄"
         )
+
+        return
+
+    target = get_user(target_id)
+
+    if not target or target.get("is_banned"):
+
+        bot.answer_callback_query(
+            c.id,
+            "Пользователь недоступен."
+        )
+
         return
 
     set_state(
@@ -2206,23 +2216,26 @@ def handle_msg(c):
         target_id=target_id
     )
 
+    bot.answer_callback_query(
+        c.id
+    )
+
     bot.send_message(
         uid,
         "💌 Выбери тип письма:",
-        reply_markup=message_type_kb(
-            target_id
-        )
+        reply_markup=message_type_kb(target_id)
     )
 
 
-# =========================================================
-# INTRO REQUEST
-# =========================================================
+# ============================================================
+# ASK USERNAME / CONTACT
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("askuser_")
 )
 def handle_askuser(c):
+
     uid = c.from_user.id
 
     target_id = int(
@@ -2230,62 +2243,74 @@ def handle_askuser(c):
     )
 
     if target_id == uid:
+
         bot.answer_callback_query(
             c.id,
             "Нельзя познакомиться с собой 😄"
         )
+
         return
 
-    user = get_user(uid)
     target = get_user(target_id)
+    requester = get_user(uid)
 
-    if not user or not target:
+    if not target or not requester:
+
         bot.answer_callback_query(
             c.id,
-            "Пользователь недоступен"
+            "Пользователь недоступен."
         )
+
         return
 
     bot.answer_callback_query(
         c.id
     )
 
-    username = (
-        user.get("username")
-        or "пользователь"
+    # Получатель сам решает,
+    # раскрывать ли свой username.
+
+    kb = InlineKeyboardMarkup(
+        row_width=2
     )
 
-    keyboard = InlineKeyboardMarkup()
-
-    keyboard.add(
+    kb.add(
         InlineKeyboardButton(
-            "✅ Дать юз",
+            "✅ Дать контакт",
             callback_data=f"giveuser_{uid}"
+        ),
+        InlineKeyboardButton(
+            "❌ Отказать",
+            callback_data=f"denyuser_{uid}"
         )
     )
 
     bot.send_message(
         target_id,
-        f"🤝 **@{username}** хочет с тобой "
-        f"познакомиться и просит твой юзернейм!",
-        reply_markup=keyboard,
+        "🤝 **Кто-то хочет с тобой познакомиться!**\n\n"
+        "Пользователь хочет получить твой Telegram-контакт.\n"
+        "Ты сам решаешь, показывать ли свой username.",
+        reply_markup=kb,
         parse_mode="Markdown"
     )
 
     bot.send_message(
         uid,
-        "🤝 Запрос на знакомство отправлен!"
+        "🤝 Запрос на знакомство отправлен!\n\n"
+        "Если человек согласится поделиться контактом, "
+        "бот отправит тебе его username."
     )
 
 
-# =========================================================
+# ============================================================
 # MESSAGE TYPE
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("msgtype_")
 )
 def handle_msgtype(c):
+
     uid = c.from_user.id
 
     parts = c.data.split("_")
@@ -2300,19 +2325,26 @@ def handle_msgtype(c):
         target_id=target_id
     )
 
+    bot.answer_callback_query(
+        c.id
+    )
+
     if msg_type == "text":
+
         bot.send_message(
             uid,
             "📝 Напиши своё письмо:"
         )
 
     elif msg_type == "voice":
+
         bot.send_message(
             uid,
             "🎤 Отправь голосовое сообщение:"
         )
 
     elif msg_type == "circle":
+
         bot.send_message(
             uid,
             "🎙️ Отправь кружок "
@@ -2320,61 +2352,108 @@ def handle_msgtype(c):
         )
 
 
-# =========================================================
+# ============================================================
 # GIVE USERNAME
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("giveuser_")
 )
 def give_user_contact(c):
-    user = get_user(
-        c.from_user.id
-    )
+
+    owner_id = c.from_user.id
 
     requester_id = int(
         c.data.split("_")[1]
     )
 
-    if not user:
+    owner = get_user(owner_id)
+
+    if not owner:
+
         bot.answer_callback_query(
             c.id,
-            "Пользователь недоступен"
+            "Ошибка."
         )
+
         return
 
-    username = (
-        user.get("username")
-        or "username отсутствует"
-    )
+    username = owner.get("username")
 
-    try:
+    if not username:
+
+        bot.answer_callback_query(
+            c.id,
+            "У тебя нет username в Telegram."
+        )
+
         bot.send_message(
             requester_id,
-            f"✅ **Контакт:** @{username}",
-            parse_mode="Markdown"
+            "❌ Пользователь согласился дать контакт, "
+            "но у него нет установленного Telegram username."
         )
 
-        bot.answer_callback_query(
-            c.id,
-            "✅ Контакт отправлен!"
-        )
+        return
 
-    except Exception:
-        bot.answer_callback_query(
-            c.id,
-            "❌ Не удалось отправить контакт"
-        )
+    bot.send_message(
+        requester_id,
+        f"🤝 **Контакт получен!**\n\n"
+        f"Telegram: @{username}",
+        parse_mode="Markdown"
+    )
+
+    bot.answer_callback_query(
+        c.id,
+        "✅ Контакт отправлен!"
+    )
+
+    bot.edit_message_reply_markup(
+        c.message.chat.id,
+        c.message.message_id,
+        reply_markup=None
+    )
 
 
-# =========================================================
+# ============================================================
+# DENY USERNAME
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith("denyuser_")
+)
+def deny_user_contact(c):
+
+    requester_id = int(
+        c.data.split("_")[1]
+    )
+
+    bot.send_message(
+        requester_id,
+        "😕 Пользователь пока не хочет "
+        "делиться своим контактом."
+    )
+
+    bot.answer_callback_query(
+        c.id,
+        "Контакт не передан."
+    )
+
+    bot.edit_message_reply_markup(
+        c.message.chat.id,
+        c.message.message_id,
+        reply_markup=None
+    )
+
+
+# ============================================================
 # REPORT
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda c: c.data.startswith("report_")
 )
 def handle_report(c):
+
     uid = c.from_user.id
 
     target_id = int(
@@ -2382,10 +2461,12 @@ def handle_report(c):
     )
 
     if target_id == uid:
+
         bot.answer_callback_query(
             c.id,
             "Нельзя пожаловаться на себя"
         )
+
         return
 
     bot.answer_callback_query(
@@ -2401,16 +2482,15 @@ def handle_report(c):
     )
 
 
-# =========================================================
+# ============================================================
 # REPORT REASON
-# =========================================================
+# ============================================================
 
 @bot.callback_query_handler(
-    func=lambda c: c.data.startswith(
-        "reportreason_"
-    )
+    func=lambda c: c.data.startswith("reportreason_")
 )
 def handle_report_reason(c):
+
     uid = c.from_user.id
 
     parts = c.data.split(
@@ -2422,10 +2502,15 @@ def handle_report_reason(c):
     reason = parts[2]
 
     if reason == "Другое":
+
         set_state(
             uid,
             action="reporting_other",
             target_id=target_id
+        )
+
+        bot.answer_callback_query(
+            c.id
         )
 
         bot.send_message(
@@ -2441,6 +2526,10 @@ def handle_report_reason(c):
         reason
     )
 
+    bot.answer_callback_query(
+        c.id
+    )
+
     bot.send_message(
         uid,
         "✅ Жалоба отправлена модераторам.",
@@ -2454,19 +2543,16 @@ def handle_report_reason(c):
     )
 
 
-# =========================================================
-# ADMIN BAN FROM REPORT
-# =========================================================
+# ============================================================
+# ADMIN BAN
+# ============================================================
 
 @bot.callback_query_handler(
-    func=lambda c: c.data.startswith(
-        "adminban_"
-    )
+    func=lambda c: c.data.startswith("adminban_")
 )
 def handle_admin_ban(c):
-    if not is_admin(
-        c.from_user.id
-    ):
+
+    if not is_admin(c.from_user.id):
         return
 
     parts = c.data.split("_")
@@ -2489,36 +2575,34 @@ def handle_admin_ban(c):
     )
 
     bot.edit_message_text(
-        f"⛔ Пользователь id "
-        f"{target_id} забанен. "
-        f"Жалоба закрыта.",
+        f"⛔ Пользователь id {target_id} "
+        f"забанен. Жалоба закрыта.",
         c.message.chat.id,
         c.message.message_id
     )
 
     try:
+
         bot.send_message(
             target_id,
             "⛔ Твой аккаунт заблокирован "
             "модерацией по жалобе."
         )
+
     except Exception:
         pass
 
 
-# =========================================================
-# ADMIN DISMISS REPORT
-# =========================================================
+# ============================================================
+# ADMIN DISMISS
+# ============================================================
 
 @bot.callback_query_handler(
-    func=lambda c: c.data.startswith(
-        "admindismiss_"
-    )
+    func=lambda c: c.data.startswith("admindismiss_")
 )
 def handle_admin_dismiss(c):
-    if not is_admin(
-        c.from_user.id
-    ):
+
+    if not is_admin(c.from_user.id):
         return
 
     report_id = int(
@@ -2541,9 +2625,9 @@ def handle_admin_dismiss(c):
     )
 
 
-# =========================================================
-# START BOT
-# =========================================================
+# ============================================================
+# START
+# ============================================================
 
 print("🚀 БОТ ЗАПУЩЕН!")
 
