@@ -1,5 +1,6 @@
 import telebot
 import os
+import random
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from telebot.types import (
@@ -25,6 +26,10 @@ MIN_AGE = 18
 
 # Free-tier daily cap on ratings given (premium users bypass this).
 FREE_DAILY_RATING_CAP = 50
+
+# Once-a-day free bonus that raises the cap without needing a real ad
+# network hooked up (that's a separate integration for later).
+DAILY_BONUS_EXTRA_RATINGS = 15
 
 bot = telebot.TeleBot(TOKEN)
 BOT_USERNAME = None  # filled in at startup via bot.get_me()
@@ -77,6 +82,10 @@ def init_db():
         ("streak_count", "INT DEFAULT 0"),
         ("last_active_date", "DATE"),
         ("filter_same_city", "BOOLEAN DEFAULT FALSE"),
+        ("bonus_claimed_date", "DATE"),
+        ("verified", "BOOLEAN DEFAULT FALSE"),
+        ("verify_status", "VARCHAR(20) DEFAULT 'none'"),
+        ("verify_code", "VARCHAR(4)"),
     ]
     for col_name, col_def in new_columns:
         cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
@@ -296,7 +305,17 @@ def main_menu():
     kb.add(KeyboardButton("👤 Профиль"), KeyboardButton("💕 Мои оценки"))
     kb.add(KeyboardButton("❤️‍🔥 Мэтчи"), KeyboardButton("🏆 Топ"))
     kb.add(KeyboardButton("👥 Пригласить друзей"), KeyboardButton("📍 Фильтр города"))
+    kb.add(KeyboardButton("🎁 Бонус"), KeyboardButton("🎥 Верификация"))
     kb.add(KeyboardButton("🗑️ Удалить профиль"))
+    return kb
+
+
+def verify_review_kb(user_id):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"verifyok_{user_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"verifyno_{user_id}"),
+    )
     return kb
 
 
@@ -381,17 +400,27 @@ def letter_reply_kb(sender_id):
     return kb
 
 
+
+# Telegram caps callback_data at 64 bytes. Cyrillic reason text encoded
+# directly into callback_data used to blow past that limit (e.g. "Оскорбления
+# / харассмент" alone is ~45 bytes, plus the "reportreason_<id>_" prefix),
+# which made Telegram reject the whole keyboard and silently break the
+# "🚩 Жалоба" button. Fix: send only a short ASCII code in callback_data and
+# look up the human-readable label from this dict when we need it.
+REPORT_REASONS = [
+    ("photo", "Неприемлемое фото"),
+    ("abuse", "Оскорбления / харассмент"),
+    ("fake", "Фейковый профиль"),
+    ("spam", "Спам / реклама"),
+    ("other", "Другое"),
+]
+REPORT_REASON_LABELS = dict(REPORT_REASONS)
+
+
 def report_reason_kb(target_id):
     kb = InlineKeyboardMarkup(row_width=1)
-    reasons = [
-        "Неприемлемое фото",
-        "Оскорбления / харассмент",
-        "Фейковый профиль",
-        "Спам / реклама",
-        "Другое",
-    ]
-    for reason in reasons:
-        kb.add(InlineKeyboardButton(reason, callback_data=f"reportreason_{target_id}_{reason}"))
+    for code, label in REPORT_REASONS:
+        kb.add(InlineKeyboardButton(label, callback_data=f"reportreason_{target_id}_{code}"))
     return kb
 
 
@@ -704,6 +733,17 @@ def get_daily_rating_count(user_id):
     return row[1] or 0
 
 
+def get_effective_daily_cap(user):
+    cap = FREE_DAILY_RATING_CAP
+    if user.get("bonus_claimed_date") == datetime.now().date():
+        cap += DAILY_BONUS_EXTRA_RATINGS
+    return cap
+
+
+def bonus_available_today(user):
+    return user.get("bonus_claimed_date") != datetime.now().date()
+
+
 def get_latest_rating(from_user, to_user):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -895,11 +935,12 @@ def build_profile_text(user, rating=None):
     bio = (user.get("bio") or "").strip()
     bio_line = f"📝 _{bio}_" if bio else "📝 _без описания_"
     premium_line = "💎 *Premium*\n" if is_premium_active(user) else ""
+    verified_mark = " ✅" if user.get("verified") else ""
     text = (
         f"{premium_line}"
         f"{rank_emoji} *{rank}*\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 *{user.get('name') or 'Анкета'}*  ·  {user['age']} лет\n"
+        f"👤 *{user.get('name') or 'Анкета'}*{verified_mark}  ·  {user['age']} лет\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📏 {user['height']} см   ⚖️ {user['weight']} кг\n"
         f"🏙️ {user['city']}\n"
@@ -1209,6 +1250,10 @@ def handle_text(m):
         show_referral(m)
     elif m.text == "📍 Фильтр города":
         show_city_filter(m)
+    elif m.text == "🎁 Бонус":
+        claim_daily_bonus(m)
+    elif m.text == "🎥 Верификация":
+        start_verification(m)
     elif m.text == "🗑️ Удалить профиль":
         confirm_delete(m)
     elif m.text == "📬 Прочитать письма":
@@ -1250,6 +1295,9 @@ def handle_voice(m):
 def handle_circle(m):
     uid = m.chat.id
     state = get_state(uid)
+    if state.get("action") == "verifying":
+        handle_verification_circle(m, uid)
+        return
     if state.get("action") == "sending_message" and state.get("msg_type") == "circle":
         target_id = state.get("target_id")
         save_message(uid, target_id, "🎙️ Кружок", "circle", m.video_note.file_id)
@@ -1316,11 +1364,16 @@ def rate_menu(uid):
         bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
         return
 
-    if not is_premium_active(user) and get_daily_rating_count(uid) >= FREE_DAILY_RATING_CAP:
+    cap = get_effective_daily_cap(user)
+    if not is_premium_active(user) and get_daily_rating_count(uid) >= cap:
+        bonus_hint = (
+            f"\n\n🎁 Есть ещё +{DAILY_BONUS_EXTRA_RATINGS} оценок — жми «🎁 Бонус» в меню, если ещё не забирал сегодня."
+            if bonus_available_today(user) else ""
+        )
         bot.send_message(
             uid,
-            f"⏳ Ты уже поставил {FREE_DAILY_RATING_CAP} оценок сегодня — это дневной лимit для бесплатного аккаунта.\n\n"
-            "💎 Premium снимает лимит полностью. Загляни завтра или напиши администратору за Premium.",
+            f"⏳ Ты уже поставил {cap} оценок сегодня — это дневной лимит.{bonus_hint}\n\n"
+            "💎 Premium снимает лимит полностью.",
             reply_markup=main_menu(),
         )
         return
@@ -1368,8 +1421,8 @@ def set_rating(c):
         return
 
     user = get_user(uid)
-    if not is_premium_active(user) and get_daily_rating_count(uid) >= FREE_DAILY_RATING_CAP:
-        bot.answer_callback_query(c.id, "Дневной лимит оценок исчерпан. Premium снимает лимит.", show_alert=True)
+    if not is_premium_active(user) and get_daily_rating_count(uid) >= get_effective_daily_cap(user):
+        bot.answer_callback_query(c.id, "Дневной лимит оценок исчерпан. Забери 🎁 бонус в меню или жди завтра.", show_alert=True)
         return
 
     target = get_user(target_id)
@@ -1511,6 +1564,34 @@ def toggle_city_filter(c):
 
 
 # =========================================================
+# DAILY FREE BONUS
+# (no real ad network hooked up yet — this is a straightforward once-a-day
+# claim. If/when you wire up something like Adsgram, swap this for a real
+# "watch an ad to unlock" flow — the rest of the cap logic stays the same.)
+# =========================================================
+
+def claim_daily_bonus(m):
+    uid = m.chat.id
+    user = get_user(uid)
+    if not user or not user.get("registered"):
+        bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
+        return
+    if is_premium_active(user):
+        bot.send_message(uid, "💎 У тебя Premium — лимита оценок и так нет, бонус не нужен 😉", reply_markup=main_menu())
+        return
+    if not bonus_available_today(user):
+        bot.send_message(uid, "✅ Бонус на сегодня уже забран. Загляни завтра!", reply_markup=main_menu())
+        return
+    update_user(uid, bonus_claimed_date=datetime.now().date())
+    bot.send_message(
+        uid,
+        f"🎁 *Бонус забран!*\n\nДневной лимит оценок увеличен на +{DAILY_BONUS_EXTRA_RATINGS} до конца сегодняшнего дня.",
+        parse_mode="Markdown",
+        reply_markup=main_menu(),
+    )
+
+
+# =========================================================
 # PROFILE
 # =========================================================
 
@@ -1529,10 +1610,12 @@ def show_profile(m):
     bio_line = f"📝 _{bio}_" if bio else "📝 _без описания_"
     viewer_count = get_unique_viewer_count(uid)
     premium_line = "💎 *Premium активен*\n" if is_premium_active(user) else ""
+    verified_line = "✅ *Аккаунт верифицирован*\n" if user.get("verified") else ""
 
     text = (
         f"{emoji} *Моя анкета*\n"
         f"{premium_line}"
+        f"{verified_line}"
         f"{rank_emoji} *Звание:* {rank}\n\n"
         f"📅 {user['age']} лет\n"
         f"📏 {user['height']} см\n"
@@ -1549,7 +1632,8 @@ def show_profile(m):
         text += f"🏆 Место в топе: {place} из {total}\n"
     daily_bonus = user.get("daily_bonus_count", 0)
     if daily_bonus > 0:
-        text += f"📊 Сегодня оценок: {daily_bonus}/{FREE_DAILY_RATING_CAP if not is_premium_active(user) else '∞'}\n"
+        cap_display = "∞" if is_premium_active(user) else get_effective_daily_cap(user)
+        text += f"📊 Сегодня оценок: {daily_bonus}/{cap_display}\n"
 
     if user.get("photo_id"):
         bot.send_photo(uid, user["photo_id"], caption=text, reply_markup=main_menu(), parse_mode="Markdown")
@@ -1795,6 +1879,106 @@ def give_user_contact(c):
 
 
 # =========================================================
+# VERIFICATION
+# A "verified" badge (✅) protects against fake/stolen photos. There's no
+# speech recognition here — a moderator watches the circle and confirms the
+# spoken number matches. That's the standard, honest way to do this without
+# bolting on a separate speech-to-text service.
+# =========================================================
+
+def start_verification(m):
+    uid = m.chat.id
+    user = get_user(uid)
+    if not user or not user.get("registered"):
+        bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
+        return
+    if user.get("verified"):
+        bot.send_message(uid, "✅ Твой аккаунт уже верифицирован.", reply_markup=main_menu())
+        return
+    if user.get("verify_status") == "pending":
+        bot.send_message(uid, "⏳ Твоя заявка уже на проверке у модераторов — немного подожди.", reply_markup=main_menu())
+        return
+
+    code = f"{random.randint(0, 9999):04d}"
+    update_user(uid, verify_code=code, verify_status="none")
+    set_state(uid, action="verifying")
+    bot.send_message(
+        uid,
+        "🎥 *Верификация аккаунта*\n\n"
+        f"Запиши кружок (видеосообщение) и произнеси в нём вслух это число: *{code}*\n\n"
+        "Это подтверждает, что фото в анкете — действительно ты.\n"
+        "Просто запиши и отправь кружок прямо сейчас 👇",
+        parse_mode="Markdown",
+    )
+
+
+def handle_verification_circle(m, uid):
+    user = get_user(uid)
+    code = user.get("verify_code") if user else None
+    if not user or not code:
+        clear_state(uid)
+        bot.send_message(uid, "⚠️ Заявка устарела — начни заново, нажми «🎥 Верификация».", reply_markup=main_menu())
+        return
+
+    update_user(uid, verify_status="pending")
+    clear_state(uid)
+    bot.send_message(uid, "✅ Кружок отправлен на проверку модераторам. Мы уведомим тебя о результате.", reply_markup=main_menu())
+
+    kb = verify_review_kb(uid)
+    username = user.get("username") or f"user_{uid}"
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_video_note(admin_id, m.video_note.file_id)
+            bot.send_message(
+                admin_id,
+                f"🎥 *Заявка на верификацию*\n\nОт: @{username} (id {uid})\nДолжен был назвать число: *{code}*",
+                reply_markup=kb, parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("verifyok_"))
+def handle_verify_ok(c):
+    if not is_admin(c.from_user.id):
+        bot.answer_callback_query(c.id)
+        return
+    target_id = int(c.data.split("_")[1])
+    update_user(target_id, verified=True, verify_status="verified", verify_code=None)
+    bot.answer_callback_query(c.id, "Верифицирован")
+    try:
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    try:
+        bot.send_message(target_id, "✅ *Твой аккаунт верифицирован!*\n\nНа анкете теперь отображается значок ✅", parse_mode="Markdown")
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("verifyno_"))
+def handle_verify_no(c):
+    if not is_admin(c.from_user.id):
+        bot.answer_callback_query(c.id)
+        return
+    target_id = int(c.data.split("_")[1])
+    update_user(target_id, verify_status="none", verify_code=None)
+    bot.answer_callback_query(c.id, "Отклонено")
+    try:
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    try:
+        bot.send_message(
+            target_id,
+            "❌ Верификация не пройдена — число не совпало или запись нечёткая.\n"
+            "Попробуй ещё раз: «🎥 Верификация».",
+        )
+    except Exception:
+        pass
+
+
+# =========================================================
 # REPORTING
 # =========================================================
 
@@ -1814,12 +1998,13 @@ def handle_report_reason(c):
     uid = c.from_user.id
     parts = c.data.split("_", 2)
     target_id = int(parts[1])
-    reason = parts[2]
-    if reason == "Другое":
+    code = parts[2]
+    if code == "other":
         set_state(uid, action="reporting_other", target_id=target_id)
         bot.answer_callback_query(c.id)
         bot.send_message(uid, "Опиши, в чём проблема:")
         return
+    reason = REPORT_REASON_LABELS.get(code, code)
     save_report(uid, target_id, reason)
     bot.answer_callback_query(c.id, "✅ Жалоба отправлена")
     bot.send_message(uid, "✅ Жалоба отправлена модераторам.", reply_markup=main_menu())
