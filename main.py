@@ -81,7 +81,6 @@ def init_db():
         ("referral_count", "INT DEFAULT 0"),
         ("streak_count", "INT DEFAULT 0"),
         ("last_active_date", "DATE"),
-        ("filter_same_city", "BOOLEAN DEFAULT FALSE"),
         ("bonus_claimed_date", "DATE"),
         ("verified", "BOOLEAN DEFAULT FALSE"),
         ("verify_status", "VARCHAR(20) DEFAULT 'none'"),
@@ -304,9 +303,8 @@ def main_menu():
     kb.add(KeyboardButton("🎲 Оценить"), KeyboardButton("💌 Письма"))
     kb.add(KeyboardButton("👤 Профиль"), KeyboardButton("💕 Мои оценки"))
     kb.add(KeyboardButton("❤️‍🔥 Мэтчи"), KeyboardButton("🏆 Топ"))
-    kb.add(KeyboardButton("👥 Пригласить друзей"), KeyboardButton("📍 Фильтр города"))
-    kb.add(KeyboardButton("🎁 Бонус"), KeyboardButton("🎥 Верификация"))
-    kb.add(KeyboardButton("🗑️ Удалить профиль"))
+    kb.add(KeyboardButton("👥 Пригласить друзей"), KeyboardButton("🎁 Бонус"))
+    kb.add(KeyboardButton("🎥 Верификация"), KeyboardButton("🗑️ Удалить профиль"))
     return kb
 
 
@@ -430,13 +428,6 @@ def profile_kb():
     return kb
 
 
-def city_filter_kb(current_state):
-    kb = InlineKeyboardMarkup(row_width=1)
-    label = "✅ Только мой город (вкл)" if current_state else "⬜ Только мой город (выкл)"
-    kb.add(InlineKeyboardButton(label, callback_data="togglecityfilter"))
-    return kb
-
-
 # =========================================================
 # STATE
 # =========================================================
@@ -527,7 +518,7 @@ def revoke_premium(user_id):
     update_user(user_id, is_premium=False, premium_until=None)
 
 
-def get_random_user(exclude_user_id, extra_exclude=None, same_city=None):
+def get_random_user(exclude_user_id, extra_exclude=None):
     extra_exclude = extra_exclude or []
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -538,9 +529,6 @@ def get_random_user(exclude_user_id, extra_exclude=None, same_city=None):
         AND NOT (id = ANY(%s))
     """
     params = [exclude_user_id, exclude_user_id, extra_exclude]
-    if same_city:
-        query += " AND city ILIKE %s"
-        params.append(same_city)
     # premium profiles get a small boost in how often they're shown
     query += " ORDER BY is_premium DESC, RANDOM() LIMIT 1"
     cur.execute(query, params)
@@ -1248,8 +1236,6 @@ def handle_text(m):
         show_top(m)
     elif m.text == "👥 Пригласить друзей":
         show_referral(m)
-    elif m.text == "📍 Фильтр города":
-        show_city_filter(m)
     elif m.text == "🎁 Бонус":
         claim_daily_bonus(m)
     elif m.text == "🎥 Верификация":
@@ -1383,18 +1369,12 @@ def rate_menu(uid):
     if rank != user.get("rank"):
         update_user(uid, rank=rank)
 
-    same_city = user["city"] if user.get("filter_same_city") and user.get("city") else None
     skipped = skipped_profiles.get(uid, set())
-    target = get_random_user(uid, extra_exclude=list(skipped), same_city=same_city)
+    target = get_random_user(uid, extra_exclude=list(skipped))
     if not target:
         if skipped:
             skipped_profiles[uid] = set()
-            target = get_random_user(uid, same_city=same_city)
-        if not target and same_city:
-            # nobody left in the same city — fall back to everyone rather than a dead end
             target = get_random_user(uid)
-            if target:
-                bot.send_message(uid, "📍 В твоём городе больше некого оценивать — показываю анкеты отовсюду.")
         if not target:
             bot.send_message(
                 uid,
@@ -1525,42 +1505,6 @@ def handle_skip(c):
     except Exception:
         pass
     rate_menu(uid)
-
-
-# =========================================================
-# CITY FILTER
-# =========================================================
-
-def show_city_filter(m):
-    uid = m.chat.id
-    user = get_user(uid)
-    if not user or not user.get("registered"):
-        bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
-        return
-    state = bool(user.get("filter_same_city"))
-    bot.send_message(
-        uid,
-        f"📍 Сейчас фильтр по городу: {'включён' if state else 'выключен'}.\n\n"
-        f"Твой город: {user.get('city') or 'не указан'}\n\n"
-        "Если включить — при оценивании будут показываться только анкеты из твоего города.",
-        reply_markup=city_filter_kb(state),
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "togglecityfilter")
-def toggle_city_filter(c):
-    uid = c.from_user.id
-    user = get_user(uid)
-    if not user:
-        bot.answer_callback_query(c.id, "Профиль не найден")
-        return
-    new_state = not bool(user.get("filter_same_city"))
-    update_user(uid, filter_same_city=new_state)
-    bot.answer_callback_query(c.id, "✅ Обновлено")
-    try:
-        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=city_filter_kb(new_state))
-    except Exception:
-        pass
 
 
 # =========================================================
