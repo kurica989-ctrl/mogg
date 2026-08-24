@@ -7,7 +7,8 @@ from telebot.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
-    KeyboardButton
+    KeyboardButton,
+    LabeledPrice,
 )
 from datetime import datetime, timedelta
 
@@ -30,6 +31,11 @@ FREE_DAILY_RATING_CAP = 50
 # Once-a-day free bonus that raises the cap without needing a real ad
 # network hooked up (that's a separate integration for later).
 DAILY_BONUS_EXTRA_RATINGS = 15
+
+# Telegram Stars price for a 24h Premium pass. Stars (XTR) needs no
+# payment provider token — Telegram handles the charge itself.
+PREMIUM_24H_STARS = 100
+PREMIUM_24H_PAYLOAD = "premium_24h"
 
 bot = telebot.TeleBot(TOKEN)
 BOT_USERNAME = None  # filled in at startup via bot.get_me()
@@ -76,7 +82,7 @@ def init_db():
         ("rank", "VARCHAR(50) DEFAULT 'Новичок'"),
         ("views_count", "INT DEFAULT 0"),
         ("is_premium", "BOOLEAN DEFAULT FALSE"),
-        ("premium_until", "DATE"),
+        ("premium_until", "TIMESTAMP"),
         ("referred_by", "BIGINT"),
         ("referral_count", "INT DEFAULT 0"),
         ("streak_count", "INT DEFAULT 0"),
@@ -88,6 +94,11 @@ def init_db():
     ]
     for col_name, col_def in new_columns:
         cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+
+    # premium_until used to be DATE (calendar-day granularity). Premium is
+    # now sold in 24h blocks via Stars, so it needs real hour/minute
+    # precision — upgrade the column type for anyone who deployed before.
+    cur.execute("ALTER TABLE users ALTER COLUMN premium_until TYPE TIMESTAMP USING premium_until::timestamp")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ratings (
@@ -242,7 +253,7 @@ def is_premium_active(user):
     until = user.get("premium_until")
     if until is None:
         return True  # permanent grant, no expiry set
-    return until >= datetime.now().date()
+    return until >= datetime.now()
 
 
 def get_ratings_given(user_id):
@@ -304,7 +315,8 @@ def main_menu():
     kb.add(KeyboardButton("👤 Профиль"), KeyboardButton("💕 Мои оценки"))
     kb.add(KeyboardButton("❤️‍🔥 Мэтчи"), KeyboardButton("🏆 Топ"))
     kb.add(KeyboardButton("👥 Пригласить друзей"), KeyboardButton("🎁 Бонус"))
-    kb.add(KeyboardButton("🎥 Верификация"), KeyboardButton("🗑️ Удалить профиль"))
+    kb.add(KeyboardButton("🎥 Верификация"), KeyboardButton("💎 Premium"))
+    kb.add(KeyboardButton("🗑️ Удалить профиль"))
     return kb
 
 
@@ -383,9 +395,10 @@ def message_type_kb(target_id):
     return kb
 
 
-def rated_notify_kb(rater_id):
+def rated_notify_kb(rater_id, rating):
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("👀 Показать анкету", callback_data=f"showrated_{rater_id}"))
+    kb.add(InlineKeyboardButton("ℹ️ Что значит эта оценка?", callback_data=f"ratinginfo_{rating}"))
     return kb
 
 
@@ -506,9 +519,18 @@ def unban_user(user_id):
     update_user(user_id, is_banned=False, ban_reason=None)
 
 
-def grant_premium(user_id, days=None):
-    if days:
-        until = (datetime.now().date() + timedelta(days=days))
+def grant_premium(user_id, days=None, hours=None, stack=False):
+    """stack=True extends from the current expiry if it's still active
+    (used for Stars purchases so back-to-back buys add up instead of
+    resetting the clock); stack=False (admin grants) always counts from now."""
+    if days or hours:
+        base = datetime.now()
+        if stack:
+            current = get_user(user_id)
+            current_until = current.get("premium_until") if current else None
+            if current_until and current_until > base:
+                base = current_until
+        until = base + timedelta(days=days or 0, hours=hours or 0)
         update_user(user_id, is_premium=True, premium_until=until)
     else:
         update_user(user_id, is_premium=True, premium_until=None)
@@ -633,17 +655,21 @@ def check_match(from_user, to_user, new_rating):
 
 
 def notify_about_rating(from_user, to_user, rating):
-    """Notify on every rating, high or low — with the rater's photo attached,
-    but never their username (that stays hidden until an explicit contact
-    exchange via 'Дать юз')."""
+    """Notify on every rating, high or low — with the rater's photo attached.
+    Username stays hidden for free users (only revealed via explicit 'Дать
+    юз' contact exchange). Premium recipients see the rater's username right
+    away — that's a paid perk, not the default behavior."""
     if from_user == to_user:
         return
     rater = get_user(from_user)
     if not rater:
         return
+    recipient = get_user(to_user)
     emoji = SCALE_EMOJIS.get(rating, "⭐")
     caption = f"{emoji} *Тебя только что оценили!*\n\nОценка: *{rating}*"
-    kb = rated_notify_kb(from_user)
+    if recipient and is_premium_active(recipient) and rater.get("username"):
+        caption += f"\n💎 Юзернейм: @{rater['username']}"
+    kb = rated_notify_kb(from_user, rating)
     try:
         if rater.get("photo_id"):
             bot.send_photo(to_user, rater["photo_id"], caption=caption, reply_markup=kb, parse_mode="Markdown")
@@ -889,6 +915,24 @@ def close_report(report_id):
     conn.close()
 
 
+def report_admin_kb(target_id, report_id):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("⛔ Забанить", callback_data=f"adminban_{target_id}_{report_id}"),
+        InlineKeyboardButton("✅ Отклонить", callback_data=f"admindismiss_{report_id}"),
+    )
+    return kb
+
+
+def notify_admins_of_report(report_id, target_id, reason):
+    """Sends the live report to admins WITH the ban/dismiss buttons attached
+    — /admin still exists separately to list any reports left unhandled."""
+    notify_admins(
+        f"🚩 *Новая жалоба* #{report_id}\n\nНа пользователя id: {target_id}\nПричина: {reason}",
+        reply_markup=report_admin_kb(target_id, report_id),
+    )
+
+
 # =========================================================
 # ADMIN
 # =========================================================
@@ -915,20 +959,26 @@ def get_registered_users_for_broadcast():
 # PROFILE DISPLAY
 # =========================================================
 
-def build_profile_text(user, rating=None):
+def build_profile_text(user, rating=None, show_username=False):
     """Shared card renderer — shows name, age, height, weight, city, bio.
-    Never includes the Telegram username (that stays private by default)."""
+    Username stays hidden by default (that's the platform's anonymity
+    model); show_username=True is only for the paid Premium reveal path,
+    passed in explicitly by the caller — never decided in here."""
     rank = user.get("rank", "Новичок")
     rank_emoji = RANK_EMOJIS.get(rank, "🧑‍🎓")
     bio = (user.get("bio") or "").strip()
     bio_line = f"📝 _{bio}_" if bio else "📝 _без описания_"
     premium_line = "💎 *Premium*\n" if is_premium_active(user) else ""
     verified_mark = " ✅" if user.get("verified") else ""
+    username_line = ""
+    if show_username and user.get("username"):
+        username_line = f"🔗 @{user['username']}\n"
     text = (
         f"{premium_line}"
         f"{rank_emoji} *{rank}*\n"
         f"━━━━━━━━━━━━━━━\n"
         f"👤 *{user.get('name') or 'Анкета'}*{verified_mark}  ·  {user['age']} лет\n"
+        f"{username_line}"
         f"━━━━━━━━━━━━━━━\n"
         f"📏 {user['height']} см   ⚖️ {user['weight']} кг\n"
         f"🏙️ {user['city']}\n"
@@ -956,7 +1006,11 @@ def show_rating_card(uid, target):
 
 
 def show_rated_profile(uid, target, rating):
-    text = build_profile_text(target, rating=rating)
+    """target here is the person who rated `uid`. If `uid` has Premium,
+    reveal target's username — that's the paid 'see who rated you' perk."""
+    viewer = get_user(uid)
+    show_username = bool(viewer and is_premium_active(viewer))
+    text = build_profile_text(target, rating=rating, show_username=show_username)
     markup = rated_profile_kb(target["id"])
     if target.get("photo_id"):
         bot.send_photo(uid, target["photo_id"], caption=text, reply_markup=markup, parse_mode="Markdown")
@@ -1190,9 +1244,10 @@ def handle_text(m):
     # --- report free text ---
     if state.get("action") == "reporting_other":
         target_id = state.get("target_id")
-        save_report(uid, target_id, m.text[:300])
+        reason = m.text[:300]
+        report_id = save_report(uid, target_id, reason)
         bot.send_message(uid, "✅ Жалоба отправлена модераторам.", reply_markup=main_menu())
-        notify_admins(f"🚩 Новая жалоба\n\nНа пользователя id: {target_id}\nПричина: {m.text[:300]}")
+        notify_admins_of_report(report_id, target_id, reason)
         clear_state(uid)
         return
 
@@ -1240,6 +1295,8 @@ def handle_text(m):
         claim_daily_bonus(m)
     elif m.text == "🎥 Верификация":
         start_verification(m)
+    elif m.text == "💎 Premium":
+        buy_premium(m)
     elif m.text == "🗑️ Удалить профиль":
         confirm_delete(m)
     elif m.text == "📬 Прочитать письма":
@@ -1444,11 +1501,24 @@ def show_rated(c):
     show_rated_profile(uid, target, rating_data["rating"])
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ratinginfo_"))
+def handle_rating_info(c):
+    """Explains what a scale tier means — shown as its own button under
+    the rating notification, so people don't have to guess what 'Sub5'
+    or 'HTN' means."""
+    rating = c.data.split("_", 1)[1]
+    emoji = SCALE_EMOJIS.get(rating, "⭐")
+    meaning = RATING_MEANINGS.get(rating, "Пояснение для этой оценки не найдено.")
+    bot.answer_callback_query(c.id)
+    bot.send_message(c.from_user.id, f"{emoji} *{rating}*\n\n{meaning}", parse_mode="Markdown")
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("viewsender_"))
 def show_letter_sender(c):
     """Same idea as 'Показать анкету' but triggered from a letter instead
     of a rating notification — lets the recipient view (and optionally
-    rate) whoever wrote to them, without exposing a username."""
+    rate) whoever wrote to them. Username is revealed only for Premium
+    viewers, same rule as everywhere else."""
     uid = c.from_user.id
     sender_id = int(c.data.split("_")[1])
     sender = get_user(sender_id)
@@ -1457,7 +1527,9 @@ def show_letter_sender(c):
         bot.send_message(uid, "😕 Анкета больше недоступна")
         return
     if has_rated(uid, sender_id):
-        text = build_profile_text(sender)
+        viewer = get_user(uid)
+        show_username = bool(viewer and is_premium_active(viewer))
+        text = build_profile_text(sender, show_username=show_username)
         if sender.get("photo_id"):
             bot.send_photo(uid, sender["photo_id"], caption=text, parse_mode="Markdown")
         else:
@@ -1536,6 +1608,79 @@ def claim_daily_bonus(m):
 
 
 # =========================================================
+# PREMIUM PURCHASE — Telegram Stars (XTR)
+# No payment provider/token needed for Stars: Telegram itself is the
+# payment processor. provider_token stays an empty string for XTR.
+# =========================================================
+
+def buy_premium(m):
+    uid = m.chat.id
+    user = get_user(uid)
+    if not user or not user.get("registered"):
+        bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
+        return
+    if is_premium_active(user):
+        until = user.get("premium_until")
+        until_text = f" до {until.strftime('%d.%m %H:%M')}" if until else " (бессрочно)"
+        bot.send_message(
+            uid,
+            f"💎 У тебя уже активен Premium{until_text}.\n\nМожешь купить ещё — время добавится сверху.",
+        )
+    try:
+        bot.send_invoice(
+            uid,
+            title="💎 Premium на 24 часа",
+            description=(
+                "На ближайшие 24 часа:\n"
+                "• Безлимит оценок\n"
+                "• Видно юзернейм каждого, кто тебя оценил\n"
+                "• Анкета показывается чаще"
+            ),
+            invoice_payload=PREMIUM_24H_PAYLOAD,
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Premium на 24 часа", amount=PREMIUM_24H_STARS)],
+        )
+    except Exception as e:
+        print(f"[buy_premium error] uid={uid}: {e}")
+        bot.send_message(uid, "⚠️ Не удалось выставить счёт. Попробуй ещё раз чуть позже.")
+
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def handle_pre_checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+
+@bot.message_handler(content_types=["successful_payment"])
+def handle_successful_payment(m):
+    uid = m.chat.id
+    payload = m.successful_payment.invoice_payload
+    stars = m.successful_payment.total_amount
+
+    if payload == PREMIUM_24H_PAYLOAD:
+        grant_premium(uid, hours=24, stack=True)
+        user = get_user(uid)
+        until = user.get("premium_until") if user else None
+        until_text = until.strftime("%d.%m %H:%M") if until else ""
+        bot.send_message(
+            uid,
+            f"💎 *Premium активирован!*\n\nДействует до {until_text}.\n\n"
+            "Теперь тебе доступны:\n"
+            "• Безлимит оценок\n"
+            "• Видно юзернейм каждого, кто тебя оценил\n"
+            "• Анкета показывается чаще",
+            parse_mode="Markdown",
+            reply_markup=main_menu(),
+        )
+        notify_admins(f"💰 *Оплата*\n\nПользователь id {uid} купил Premium на 24ч за {stars}⭐")
+    else:
+        # Unknown payload — still acknowledge so Telegram doesn't retry,
+        # but don't silently grant anything.
+        bot.send_message(uid, "✅ Платёж получен.", reply_markup=main_menu())
+        notify_admins(f"⚠️ Оплата с неизвестным payload '{payload}' от id {uid} на {stars}⭐ — проверь вручную.")
+
+
+# =========================================================
 # PROFILE
 # =========================================================
 
@@ -1553,7 +1698,14 @@ def show_profile(m):
     bio = (user.get("bio") or "").strip()
     bio_line = f"📝 _{bio}_" if bio else "📝 _без описания_"
     viewer_count = get_unique_viewer_count(uid)
-    premium_line = "💎 *Premium активен*\n" if is_premium_active(user) else ""
+    premium_active = is_premium_active(user)
+    premium_until = user.get("premium_until")
+    if premium_active and premium_until:
+        premium_line = f"💎 *Premium активен* до {premium_until.strftime('%d.%m %H:%M')}\n"
+    elif premium_active:
+        premium_line = "💎 *Premium активен* (бессрочно)\n"
+    else:
+        premium_line = ""
     verified_line = "✅ *Аккаунт верифицирован*\n" if user.get("verified") else ""
 
     text = (
@@ -1949,10 +2101,10 @@ def handle_report_reason(c):
         bot.send_message(uid, "Опиши, в чём проблема:")
         return
     reason = REPORT_REASON_LABELS.get(code, code)
-    save_report(uid, target_id, reason)
+    report_id = save_report(uid, target_id, reason)
     bot.answer_callback_query(c.id, "✅ Жалоба отправлена")
     bot.send_message(uid, "✅ Жалоба отправлена модераторам.", reply_markup=main_menu())
-    notify_admins(f"🚩 *Новая жалоба*\n\nНа пользователя id: {target_id}\nПричина: {reason}")
+    notify_admins_of_report(report_id, target_id, reason)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adminban_"))
