@@ -104,6 +104,18 @@ def init_db():
     # precision — upgrade the column type for anyone who deployed before.
     cur.execute("ALTER TABLE users ALTER COLUMN premium_until TYPE TIMESTAMP USING premium_until::timestamp")
 
+    # reg_last_step_at is new — anyone who was already stuck mid-registration
+    # before this deploy has it NULL, and the reminder query skips NULLs on
+    # purpose (so freshly-created users aren't reminded instantly). Backfill
+    # NOW() for existing stragglers so they get swept into the very first
+    # reminder pass ~30 min after this deploy, instead of being invisible
+    # forever. This only touches rows still NULL, so it's a no-op after the
+    # first run.
+    cur.execute("""
+        UPDATE users SET reg_last_step_at = NOW()
+        WHERE registered = FALSE AND age IS NOT NULL AND reg_last_step_at IS NULL
+    """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ratings (
             id SERIAL PRIMARY KEY,
@@ -1200,6 +1212,60 @@ def broadcast(m):
 # TEXT HANDLER
 # =========================================================
 
+@bot.message_handler(commands=["stuck"])
+def cmd_stuck(m):
+    """Admin-only: shows exactly where people are dropping out of
+    registration right now, and for how long — the real answer to
+    'why did only 17 of 51 finish signing up'. Registered here, before
+    the catch-all text handler below, on purpose — pyTelegramBotAPI stops
+    at the first handler whose filter matches a message, and handle_text's
+    func=lambda m: True matches literally everything, /commands included.
+    Any command handler placed after it in the file would be silently
+    unreachable, which is exactly what happened to this one originally."""
+    uid = m.chat.id
+    if not is_admin(uid):
+        return
+    rows = get_all_unfinished_registrations()
+    if not rows:
+        bot.send_message(uid, "✅ Сейчас никто не завис в регистрации.")
+        return
+
+    by_step = {}
+    for user in rows:
+        step = get_registration_step(user)
+        by_step.setdefault(step, []).append(user)
+
+    step_labels = {
+        "age": "возраст",
+        "height": "рост/вес",
+        "city": "город",
+        "bio": "био",
+        "photo": "фото",
+        "gender": "пол (последний шаг)",
+    }
+
+    lines = [f"📊 *Незавершённых регистраций: {len(rows)}*\n"]
+    for step, label in step_labels.items():
+        users_here = by_step.get(step, [])
+        if users_here:
+            lines.append(f"• {label}: {len(users_here)} чел.")
+
+    lines.append("\n*Дольше всех застряли:*")
+    now = datetime.now()
+    for user in rows[:10]:
+        step = get_registration_step(user)
+        last = user.get("reg_last_step_at")
+        if last:
+            minutes = int((now - last).total_seconds() // 60)
+            when = f"{minutes} мин назад" if minutes < 60 else f"{minutes // 60} ч назад"
+        else:
+            when = "неизвестно когда"
+        uname = user.get("username") or f"id{user['id']}"
+        lines.append(f"@{uname} — застрял на «{step_labels.get(step, step)}» ({when})")
+
+    bot.send_message(uid, "\n".join(lines), parse_mode="Markdown")
+
+
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def handle_text(m):
     uid = m.chat.id
@@ -2202,6 +2268,26 @@ def find_stuck_registrations():
           AND reg_last_step_at < NOW() - INTERVAL '%s minutes'
         """
         % REGISTRATION_REMINDER_AFTER_MINUTES
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_all_unfinished_registrations():
+    """Everyone currently mid-registration, regardless of whether a
+    reminder was already sent — this is the 'show me the funnel' view for
+    /stuck, separate from find_stuck_registrations() which is only for the
+    reminder loop and skips people already pinged."""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        """
+        SELECT * FROM users
+        WHERE registered = FALSE AND age IS NOT NULL
+        ORDER BY reg_last_step_at ASC NULLS FIRST
+        """
     )
     rows = cur.fetchall()
     cur.close()
