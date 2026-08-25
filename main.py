@@ -1,6 +1,8 @@
 import telebot
 import os
 import random
+import threading
+import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from telebot.types import (
@@ -91,6 +93,8 @@ def init_db():
         ("verified", "BOOLEAN DEFAULT FALSE"),
         ("verify_status", "VARCHAR(20) DEFAULT 'none'"),
         ("verify_code", "VARCHAR(4)"),
+        ("reg_last_step_at", "TIMESTAMP"),
+        ("reg_reminder_sent", "BOOLEAN DEFAULT FALSE"),
     ]
     for col_name, col_def in new_columns:
         cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
@@ -479,12 +483,19 @@ def create_user(user_id, username, name, referred_by=None):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO users (id, username, name, referred_by) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-        (user_id, username, name, referred_by),
+        "INSERT INTO users (id, username, name, referred_by, reg_last_step_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+        (user_id, username, name, referred_by, datetime.now()),
     )
     conn.commit()
     cur.close()
     conn.close()
+
+
+def touch_registration_step(user_id):
+    """Call this after every registration step. Resets the 'stuck here'
+    timer and clears reg_reminder_sent, so a user who comes back on their
+    own doesn't get pinged again for the step they just finished."""
+    update_user(user_id, reg_last_step_at=datetime.now(), reg_reminder_sent=False)
 
 
 def update_user(user_id, **kwargs):
@@ -1210,27 +1221,30 @@ def handle_text(m):
             bot.send_message(uid, "❌ Введи корректный возраст.")
             return
         update_user(uid, age=age)
-        bot.send_message(uid, "📏 Какой у тебя рост?\n(в сантиметрах, число от 100 до 250)")
+        touch_registration_step(uid)
+        bot.send_message(uid, "📏 Какой у тебя рост и вес?\n(через пробел, например: 180 75)")
         return
 
     if user.get("age") and not user.get("height"):
-        if not m.text.isdigit() or not (100 <= int(m.text) <= 250):
-            bot.send_message(uid, "❌ Рост нужно указать числом от 100 до 250 см.")
+        parts = m.text.split()
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            bot.send_message(uid, "❌ Введи рост и вес через пробел, например: 180 75")
             return
-        update_user(uid, height=int(m.text))
-        bot.send_message(uid, "⚖️ А вес?\n(в килограммах, число от 30 до 250)")
-        return
-
-    if user.get("height") and not user.get("weight"):
-        if not m.text.isdigit() or not (30 <= int(m.text) <= 250):
-            bot.send_message(uid, "❌ Вес нужно указать числом от 30 до 250 кг.")
+        height, weight = int(parts[0]), int(parts[1])
+        if not (100 <= height <= 250):
+            bot.send_message(uid, "❌ Рост должен быть от 100 до 250 см.")
             return
-        update_user(uid, weight=int(m.text))
+        if not (30 <= weight <= 250):
+            bot.send_message(uid, "❌ Вес должен быть от 30 до 250 кг.")
+            return
+        update_user(uid, height=height, weight=weight)
+        touch_registration_step(uid)
         bot.send_message(uid, "🏙️ Из какого ты города?")
         return
 
     if user.get("weight") and not user.get("city"):
         update_user(uid, city=m.text[:50])
+        touch_registration_step(uid)
         bot.send_message(uid, "📝 Расскажи немного о себе\n(максимум 200 символов)\n\nМожно пропустить — просто напиши *пропустить*", parse_mode="Markdown")
         return
 
@@ -1238,6 +1252,7 @@ def handle_text(m):
         text_lower = (m.text or "").strip().lower()
         bio_value = "" if text_lower in ("пропустить", "skip", "-", "нет", "не хочу") else (m.text or "")[:200]
         update_user(uid, bio=bio_value)
+        touch_registration_step(uid)
         bot.send_message(uid, "📸 Отлично! Теперь отправь свою фотографию\n(лучше селфи или портрет в хорошем качестве)", parse_mode="Markdown")
         return
 
@@ -1315,6 +1330,7 @@ def handle_photo(m):
     user = get_user(uid)
     if user and user.get("city") and user.get("bio") is not None and not user.get("photo_id"):
         update_user(uid, photo_id=m.photo[-1].file_id)
+        touch_registration_step(uid)
         bot.send_message(uid, "👤 Последний шаг — выбери свой пол 👇", reply_markup=gender_kb())
 
 
@@ -2143,6 +2159,83 @@ def handle_admin_dismiss(c):
 # =========================================================
 # START POLLING
 # =========================================================
+
+REGISTRATION_REMINDER_AFTER_MINUTES = 30
+REGISTRATION_REMINDER_CHECK_INTERVAL_SECONDS = 300  # check every 5 minutes
+
+REGISTRATION_STEP_PROMPTS = {
+    "age": "Сколько тебе лет? (число)",
+    "height": "Какой у тебя рост и вес?\n(через пробел, например: 180 75)",
+    "city": "Из какого ты города?",
+    "bio": "Расскажи немного о себе (или напиши *пропустить*)",
+    "photo": "Отправь свою фотографию 📸",
+    "gender": "Выбери свой пол 👇",
+}
+
+
+def get_registration_step(user):
+    """Which prompt a half-registered user is stuck on, based on which
+    fields are already filled in — same order as the registration flow."""
+    if not user.get("age"):
+        return "age"
+    if not user.get("height"):
+        return "height"
+    if not user.get("city"):
+        return "city"
+    if user.get("bio") is None:
+        return "bio"
+    if not user.get("photo_id"):
+        return "photo"
+    return "gender"
+
+
+def find_stuck_registrations():
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        """
+        SELECT * FROM users
+        WHERE registered = FALSE
+          AND age IS NOT NULL
+          AND reg_reminder_sent = FALSE
+          AND reg_last_step_at IS NOT NULL
+          AND reg_last_step_at < NOW() - INTERVAL '%s minutes'
+        """
+        % REGISTRATION_REMINDER_AFTER_MINUTES
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def registration_reminder_loop():
+    """Runs forever in a background thread. Polls the DB every few minutes
+    for people who started registration but stalled partway through, and
+    nudges each one exactly once (reg_reminder_sent guards against spam —
+    it resets automatically if they make progress on their own)."""
+    while True:
+        try:
+            for user in find_stuck_registrations():
+                step = get_registration_step(user)
+                prompt = REGISTRATION_STEP_PROMPTS.get(step, "продолжить регистрацию")
+                try:
+                    bot.send_message(
+                        user["id"],
+                        f"👋 Не закончил регистрацию — осталось совсем немного!\n\n{prompt}",
+                    )
+                    update_user(user["id"], reg_reminder_sent=True)
+                except Exception as e:
+                    # Most common cause: user blocked the bot — mark as
+                    # sent anyway so we stop retrying them every cycle.
+                    print(f"[reminder] failed to message {user['id']}: {e}")
+                    update_user(user["id"], reg_reminder_sent=True)
+        except Exception as e:
+            print(f"[reminder loop] error: {e}")
+        time.sleep(REGISTRATION_REMINDER_CHECK_INTERVAL_SECONDS)
+
+
+threading.Thread(target=registration_reminder_loop, daemon=True).start()
 
 try:
     BOT_USERNAME = bot.get_me().username
