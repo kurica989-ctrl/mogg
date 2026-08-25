@@ -976,11 +976,39 @@ def report_admin_kb(target_id, report_id):
 
 def notify_admins_of_report(report_id, target_id, reason):
     """Sends the live report to admins WITH the ban/dismiss buttons attached
-    — /admin still exists separately to list any reports left unhandled."""
-    notify_admins(
-        f"🚩 *Новая жалоба* #{report_id}\n\nНа пользователя id: {target_id}\nПричина: {reason}",
-        reply_markup=report_admin_kb(target_id, report_id),
-    )
+    — /admin still exists separately to list any reports left unhandled.
+    Also attaches the reported user's own profile card (photo + info) so
+    an admin can actually see what's being reported and decide right there,
+    instead of just getting a bare user id."""
+    target = get_user(target_id)
+    kb = report_admin_kb(target_id, report_id)
+    header = f"🚩 *Новая жалоба* #{report_id}\n\nНа пользователя id: {target_id}\nПричина: {reason}"
+
+    if not target:
+        notify_admins(header + "\n\n⚠️ Анкета не найдена (возможно, уже удалена).", reply_markup=kb)
+        return
+
+    caption = header + "\n━━━━━━━━━━━━━━━\n" + build_profile_text(target)
+    if target.get("photo_id") and len(caption) > 1024:
+        # Telegram hard-caps photo captions at 1024 chars — a long bio can
+        # push this over. Trim the profile part (not the report header,
+        # that's the important bit) rather than let the whole send fail.
+        overflow = len(caption) - 1024 + 3  # +3 for the "..." we add back
+        caption = caption[: len(caption) - overflow] + "..."
+    for admin_id in ADMIN_IDS:
+        try:
+            if target.get("photo_id"):
+                bot.send_photo(admin_id, target["photo_id"], caption=caption, reply_markup=kb, parse_mode="Markdown")
+            else:
+                bot.send_message(admin_id, caption, reply_markup=kb, parse_mode="Markdown")
+        except Exception as e:
+            print(f"[notify_admins_of_report] failed for admin {admin_id}: {e}")
+            # Fall back to a text-only report so the admin at least sees
+            # something and can still act on it via the buttons.
+            try:
+                bot.send_message(admin_id, header, reply_markup=kb, parse_mode="Markdown")
+            except Exception:
+                pass
 
 
 # =========================================================
