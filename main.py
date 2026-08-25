@@ -467,7 +467,20 @@ def report_reason_kb(target_id):
 
 def profile_kb():
     kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("✏️ Редактировать анкету", callback_data="edit_profile"))
     kb.add(InlineKeyboardButton("📤 Поделиться / пригласить", callback_data="share_profile"))
+    return kb
+
+
+def edit_profile_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("📸 Фото", callback_data="editfield_photo"),
+        InlineKeyboardButton("📏 Рост и вес", callback_data="editfield_height"),
+        InlineKeyboardButton("🏙️ Город", callback_data="editfield_city"),
+        InlineKeyboardButton("📝 Описание", callback_data="editfield_bio"),
+        InlineKeyboardButton("⬅️ Отмена", callback_data="editfield_cancel"),
+    )
     return kb
 
 
@@ -1292,6 +1305,14 @@ def handle_text(m):
         bot.send_message(uid, "⛔ Твой аккаунт заблокирован модерацией.")
         return
 
+    # --- editing an existing field (checked before registration, since a
+    # registered user has every registration field already filled in, so
+    # those checks below would just fall through anyway — this is just to
+    # make the intent explicit and avoid relying on that fallthrough) ---
+    if state.get("action") == "editing" and state.get("field") != "photo":
+        if handle_profile_edit_text(uid, m):
+            return
+
     # --- registration ---
     if not user.get("age") and m.text.isdigit():
         age = int(m.text)
@@ -1409,7 +1430,17 @@ def handle_text(m):
 def handle_photo(m):
     uid = m.chat.id
     user = get_user(uid)
-    if user and user.get("city") and user.get("bio") is not None and not user.get("photo_id"):
+    if not user:
+        return
+
+    state = get_state(uid)
+    if state.get("action") == "editing" and state.get("field") == "photo":
+        update_user(uid, photo_id=m.photo[-1].file_id)
+        clear_state(uid)
+        bot.send_message(uid, "✅ Фото обновлено!", reply_markup=main_menu())
+        return
+
+    if user.get("city") and user.get("bio") is not None and not user.get("photo_id"):
         update_user(uid, photo_id=m.photo[-1].file_id)
         touch_registration_step(uid)
         bot.send_message(uid, "👤 Последний шаг — выбери свой пол 👇", reply_markup=gender_kb())
@@ -1832,7 +1863,7 @@ def show_profile(m):
         bot.send_photo(uid, user["photo_id"], caption=text, reply_markup=main_menu(), parse_mode="Markdown")
     else:
         bot.send_message(uid, text, reply_markup=main_menu(), parse_mode="Markdown")
-    bot.send_message(uid, "👇 Поделиться профилем / пригласить друзей:", reply_markup=profile_kb())
+    bot.send_message(uid, "👇 Управление анкетой:", reply_markup=profile_kb())
 
 
 # =========================================================
@@ -1893,6 +1924,92 @@ def share_profile(c):
         f"Попробуй тоже: {link}"
     )
     bot.send_message(uid, f"📤 Вот текст, который можно переслать друзьям или в сторис:\n\n{share_text}")
+
+
+# =========================================================
+# EDIT PROFILE
+# =========================================================
+
+@bot.callback_query_handler(func=lambda c: c.data == "edit_profile")
+def edit_profile_menu(c):
+    uid = c.from_user.id
+    user = get_user(uid)
+    bot.answer_callback_query(c.id)
+    if not user or not user.get("registered"):
+        return
+    bot.send_message(uid, "✏️ Что хочешь изменить?", reply_markup=edit_profile_kb())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("editfield_"))
+def edit_field_start(c):
+    uid = c.from_user.id
+    field = c.data.split("_", 1)[1]
+    bot.answer_callback_query(c.id)
+
+    if field == "cancel":
+        try:
+            bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    prompts = {
+        "photo": "📸 Пришли новое фото анкеты",
+        "height": "📏 Пришли новые рост и вес через пробел\n(например: 180 75)",
+        "city": "🏙️ Из какого ты города?",
+        "bio": "📝 Расскажи о себе заново\n(максимум 200 символов, можно написать *пропустить* для пустого описания)",
+    }
+    if field not in prompts:
+        return
+
+    set_state(uid, action="editing", field=field)
+    try:
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(uid, prompts[field], parse_mode="Markdown")
+
+
+def handle_profile_edit_text(uid, m):
+    """Called from handle_text when state.action == 'editing' and the field
+    being edited takes text input (height/weight, city, bio — photo is
+    handled separately in handle_photo). Returns True if it consumed the
+    message, so the caller knows not to fall through to anything else."""
+    state = get_state(uid)
+    field = state.get("field")
+
+    if field == "height":
+        parts = m.text.split()
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            bot.send_message(uid, "❌ Введи рост и вес через пробел, например: 180 75")
+            return True
+        height, weight = int(parts[0]), int(parts[1])
+        if not (100 <= height <= 250):
+            bot.send_message(uid, "❌ Рост должен быть от 100 до 250 см.")
+            return True
+        if not (30 <= weight <= 250):
+            bot.send_message(uid, "❌ Вес должен быть от 30 до 250 кг.")
+            return True
+        update_user(uid, height=height, weight=weight)
+        clear_state(uid)
+        bot.send_message(uid, "✅ Рост и вес обновлены!", reply_markup=main_menu())
+        return True
+
+    if field == "city":
+        update_user(uid, city=m.text[:50])
+        clear_state(uid)
+        bot.send_message(uid, "✅ Город обновлён!", reply_markup=main_menu())
+        return True
+
+    if field == "bio":
+        text_lower = (m.text or "").strip().lower()
+        bio_value = "" if text_lower in ("пропустить", "skip", "-", "нет", "не хочу") else (m.text or "")[:200]
+        update_user(uid, bio=bio_value)
+        clear_state(uid)
+        bot.send_message(uid, "✅ Описание обновлено!", reply_markup=main_menu())
+        return True
+
+    return False
 
 
 # =========================================================
@@ -2344,4 +2461,15 @@ except Exception:
     BOT_USERNAME = None
 
 print("🚀 БОТ ЗАПУЩЕН!")
-bot.infinity_polling(skip_pending=True)
+
+# infinity_polling is supposed to retry on its own, but a 409 Conflict
+# (two pollers on the same token — usually a brief overlap during a
+# Railway redeploy) can escape from __skip_updates() before the retry
+# loop even starts, killing the whole process. Wrap it so that doesn't
+# take the container down — just wait a bit and reconnect.
+while True:
+    try:
+        bot.infinity_polling(skip_pending=True, timeout=30)
+    except Exception as e:
+        print(f"[polling crashed] {e} — retrying in 15s")
+        time.sleep(15)
