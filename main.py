@@ -1,6 +1,4 @@
 import telebot
-import telebot.apihelper
-telebot.apihelper.API_URL = "https://mogg.kurica989.workers.dev/bot{0}/{1}"
 import os
 import random
 import psycopg2
