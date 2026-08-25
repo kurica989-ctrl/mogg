@@ -263,6 +263,20 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
+def md_safe(text):
+    """Escapes legacy-Markdown formatting characters (_ * ` [) in
+    user-supplied text (name, bio, username) before it goes into any
+    message sent with parse_mode='Markdown'. Without this, an unpaired
+    character in someone's name/bio (very common — usernames often have
+    underscores) makes Telegram reject the whole message with 'can't find
+    end of the entity', and the send just silently fails."""
+    if not text:
+        return text
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def is_premium_active(user):
     if not user or not user.get("is_premium"):
         return False
@@ -691,7 +705,7 @@ def notify_about_rating(from_user, to_user, rating):
     emoji = SCALE_EMOJIS.get(rating, "⭐")
     caption = f"{emoji} *Тебя только что оценили!*\n\nОценка: *{rating}*"
     if recipient and is_premium_active(recipient) and rater.get("username"):
-        caption += f"\n💎 Юзернейм: @{rater['username']}"
+        caption += f"\n💎 Юзернейм: @{md_safe(rater['username'])}"
     kb = rated_notify_kb(from_user, rating)
     try:
         if rater.get("photo_id"):
@@ -989,18 +1003,19 @@ def build_profile_text(user, rating=None, show_username=False):
     passed in explicitly by the caller — never decided in here."""
     rank = user.get("rank", "Новичок")
     rank_emoji = RANK_EMOJIS.get(rank, "🧑‍🎓")
-    bio = (user.get("bio") or "").strip()
+    bio = md_safe((user.get("bio") or "").strip())
     bio_line = f"📝 _{bio}_" if bio else "📝 _без описания_"
     premium_line = "💎 *Premium*\n" if is_premium_active(user) else ""
     verified_mark = " ✅" if user.get("verified") else ""
     username_line = ""
     if show_username and user.get("username"):
-        username_line = f"🔗 @{user['username']}\n"
+        username_line = f"🔗 @{md_safe(user['username'])}\n"
+    safe_name = md_safe(user.get("name")) or "Анкета"
     text = (
         f"{premium_line}"
         f"{rank_emoji} *{rank}*\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 *{user.get('name') or 'Анкета'}*{verified_mark}  ·  {user['age']} лет\n"
+        f"👤 *{safe_name}*{verified_mark}  ·  {user['age']} лет\n"
         f"{username_line}"
         f"━━━━━━━━━━━━━━━\n"
         f"📏 {user['height']} см   ⚖️ {user['weight']} кг\n"
@@ -1244,13 +1259,13 @@ def cmd_stuck(m):
         "gender": "пол (последний шаг)",
     }
 
-    lines = [f"📊 *Незавершённых регистраций: {len(rows)}*\n"]
+    lines = [f"📊 Незавершённых регистраций: {len(rows)}\n"]
     for step, label in step_labels.items():
         users_here = by_step.get(step, [])
         if users_here:
             lines.append(f"• {label}: {len(users_here)} чел.")
 
-    lines.append("\n*Дольше всех застряли:*")
+    lines.append("\nДольше всех застряли:")
     now = datetime.now()
     for user in rows[:10]:
         step = get_registration_step(user)
@@ -1263,7 +1278,7 @@ def cmd_stuck(m):
         uname = user.get("username") or f"id{user['id']}"
         lines.append(f"@{uname} — застрял на «{step_labels.get(step, step)}» ({when})")
 
-    bot.send_message(uid, "\n".join(lines), parse_mode="Markdown")
+    bot.send_message(uid, "\n".join(lines))
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -1777,7 +1792,7 @@ def show_profile(m):
     rank_emoji = RANK_EMOJIS.get(rank, "🧑‍🎓")
     emoji = "👨" if user["gender"] == "male" else "👩"
     place, total = get_user_place(uid)
-    bio = (user.get("bio") or "").strip()
+    bio = md_safe((user.get("bio") or "").strip())
     bio_line = f"📝 _{bio}_" if bio else "📝 _без описания_"
     viewer_count = get_unique_viewer_count(uid)
     premium_active = is_premium_active(user)
@@ -1932,7 +1947,7 @@ def show_matches(m):
         user = get_user(match_id)
         if user:
             username = user.get("username") or "пользователь"
-            text += f"👥 @{username}\n"
+            text += f"👥 @{md_safe(username)}\n"
     bot.send_message(uid, text, parse_mode="Markdown", reply_markup=main_menu())
 
 
@@ -1968,7 +1983,7 @@ def show_top(m):
         rank_emoji = RANK_EMOJIS.get(u["rank"], "🧑‍🎓")
         premium_mark = "💎" if u["is_premium"] else ""
         place = medals.get(i, f"{i}.")
-        text += f"{place} {emoji} {u['name']} {rank_emoji}{premium_mark} — {u['count']} 🌟\n"
+        text += f"{place} {emoji} {md_safe(u['name'])} {rank_emoji}{premium_mark} — {u['count']} 🌟\n"
     bot.send_message(uid, text, parse_mode="Markdown", reply_markup=main_menu())
 
 
@@ -2050,7 +2065,7 @@ def give_user_contact(c):
         return
     username = user.get("username") or f"user_{user['id']}"
     try:
-        bot.send_message(requester_id, f"✅ *Контакт:* @{username}", parse_mode="Markdown")
+        bot.send_message(requester_id, f"✅ *Контакт:* @{md_safe(username)}", parse_mode="Markdown")
         bot.answer_callback_query(c.id, "✅ Контакт отправлен!")
     except Exception:
         bot.answer_callback_query(c.id, "❌ Не удалось отправить контакт")
@@ -2109,7 +2124,7 @@ def handle_verification_circle(m, uid):
             bot.send_video_note(admin_id, m.video_note.file_id)
             bot.send_message(
                 admin_id,
-                f"🎥 *Заявка на верификацию*\n\nОт: @{username} (id {uid})\nДолжен был назвать число: *{code}*",
+                f"🎥 *Заявка на верификацию*\n\nОт: @{md_safe(username)} (id {uid})\nДолжен был назвать число: *{code}*",
                 reply_markup=kb, parse_mode="Markdown",
             )
         except Exception:
