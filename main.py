@@ -1026,7 +1026,7 @@ def notify_admins(text, reply_markup=None):
 def get_registered_users_for_broadcast():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE registered=TRUE AND is_banned=FALSE")
+    cur.execute("SELECT id FROM users WHERE is_banned=FALSE")
     users = cur.fetchall()
     cur.close()
     conn.close()
