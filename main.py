@@ -1086,9 +1086,13 @@ def notify_admins(text, reply_markup=None):
 
 
 def get_registered_users_for_broadcast():
+    """Everyone who has ever pressed /start, finished registration or not
+    — excluding only banned accounts. Not-yet-registered users are still
+    real chat_ids that can receive messages, so they're included on
+    purpose (e.g. re-engagement / announcement broadcasts)."""
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE registered=TRUE AND is_banned=FALSE")
+    cur.execute("SELECT id FROM users WHERE is_banned=FALSE")
     users = cur.fetchall()
     cur.close()
     conn.close()
@@ -1732,6 +1736,12 @@ def rate_menu(uid):
     show_rating_card(uid, target)
 
 
+def locked_profile_kb(target_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔒 Вернуться к анкете", callback_data=f"reopenrated_{target_id}"))
+    return kb
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rate_"))
 def set_rating(c):
     parts = c.data.split("_", 2)
@@ -1760,12 +1770,27 @@ def set_rating(c):
     emoji = SCALE_EMOJIS.get(rating, "⭐")
     bot.answer_callback_query(c.id, f"✅ {emoji} {rating}")
 
+    # Keep the rated card visible instead of deleting it — just swap the
+    # keyboard for a locked "return to profile" button, so the person can't
+    # re-rate but still has something to tap.
     try:
-        bot.delete_message(c.message.chat.id, c.message.message_id)
+        bot.edit_message_reply_markup(
+            c.message.chat.id, c.message.message_id, reply_markup=locked_profile_kb(target_id)
+        )
     except Exception:
         pass
 
     rate_menu(uid)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("reopenrated_"))
+def handle_reopen_rated(c):
+    """The locked '🔒 Вернуться к анкете' button left behind on an
+    already-rated card — this is the paywall prompt for that action."""
+    uid = c.from_user.id
+    bot.answer_callback_query(c.id, "🔒 Нужен Premium для этого действия", show_alert=True)
+    bot.send_message(uid, "💎 Чтобы возвращаться к уже оценённым анкетам, нужен Premium.")
+    buy_premium(c.message)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("showrated_"))
