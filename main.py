@@ -144,6 +144,12 @@ def init_db():
         )
     """)
 
+    # is_anon: message came in through a personal "anonymous opinion" link
+    # rather than the regular (identity-visible) letter flow. from_user is
+    # still stored either way — needed for abuse reports / bans — it's just
+    # never surfaced to the recipient in the UI when this flag is set.
+    cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_anon BOOLEAN DEFAULT FALSE")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS matches (
             id SERIAL PRIMARY KEY,
@@ -344,9 +350,9 @@ def main_menu():
     kb.add(KeyboardButton("🎲 Оценить"), KeyboardButton("💌 Письма"))
     kb.add(KeyboardButton("👤 Профиль"), KeyboardButton("💕 Мои оценки"))
     kb.add(KeyboardButton("❤️‍🔥 Мэтчи"), KeyboardButton("🏆 Топ"))
-    kb.add(KeyboardButton("👥 Пригласить друзей"), KeyboardButton("🎁 Бонус"))
-    kb.add(KeyboardButton("🎥 Верификация"), KeyboardButton("💎 Premium"))
-    kb.add(KeyboardButton("🗑️ Удалить профиль"))
+    kb.add(KeyboardButton("👥 Пригласить друзей"), KeyboardButton("🕵️ Анонимные мнения"))
+    kb.add(KeyboardButton("🎁 Бонус"), KeyboardButton("🎥 Верификация"))
+    kb.add(KeyboardButton("💎 Premium"), KeyboardButton("🗑️ Удалить профиль"))
     return kb
 
 
@@ -438,6 +444,17 @@ def letter_reply_kb(sender_id):
         InlineKeyboardButton("👀 Анкета", callback_data=f"viewsender_{sender_id}"),
         InlineKeyboardButton("🤝 Познакомиться", callback_data=f"askuser_{sender_id}"),
     )
+    return kb
+
+
+def anon_message_kb(sender_id):
+    # Deliberately NO "view profile" / "get to know" buttons here — those
+    # would let the recipient deanonymize the sender. Report still works:
+    # from_user is stored in the DB even for anon messages, so abuse is
+    # still traceable by admins even though the recipient never sees it.
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("🕵️ Ответить анонимно", callback_data=f"anonreply_{sender_id}"))
+    kb.add(InlineKeyboardButton("🚩 Пожаловаться", callback_data=f"report_{sender_id}"))
     return kb
 
 
@@ -867,27 +884,72 @@ def referral_link(user_id):
     return f"(ссылка появится после первого /start у бота) start=ref_{user_id}"
 
 
+def anon_link(user_id):
+    if BOT_USERNAME:
+        return f"https://t.me/{BOT_USERNAME}?start=anon_{user_id}"
+    return f"(ссылка появится после первого /start у бота) start=anon_{user_id}"
+
+
+# Simple per-sender daily cap on anonymous messages, so one account can't
+# flood a target's inbox or use the anon channel for spam. Mirrors the
+# FREE_DAILY_RATING_CAP pattern already used for ratings.
+ANON_DAILY_SEND_CAP = 40
+
+
+def count_anon_sent_today(user_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM messages WHERE from_user=%s AND is_anon=TRUE "
+        "AND created_at >= NOW() - INTERVAL '24 hours'",
+        (user_id,),
+    )
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return count
+
+
 # =========================================================
 # MESSAGES
 # =========================================================
 
-def save_message(from_user, to_user, content, msg_type, file_id=None):
+def save_message(from_user, to_user, content, msg_type, file_id=None, is_anon=False):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO messages (from_user, to_user, content, message_type, file_id) VALUES (%s, %s, %s, %s, %s)",
-        (from_user, to_user, content, msg_type, file_id),
+        "INSERT INTO messages (from_user, to_user, content, message_type, file_id, is_anon) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (from_user, to_user, content, msg_type, file_id, is_anon),
     )
     conn.commit()
     cur.close()
     conn.close()
 
 
+def finish_anon_send(uid):
+    """Common confirmation after any anon message (text/voice/circle) is
+    saved. Registered users just get a thank-you; someone who followed the
+    link without ever registering gets pitched to make their own profile —
+    that's the growth loop: anon senders become new users."""
+    sender = get_user(uid)
+    if sender and sender.get("registered"):
+        bot.send_message(uid, "✅ Анонимное сообщение отправлено!", reply_markup=main_menu())
+    else:
+        bot.send_message(
+            uid,
+            "✅ Анонимное сообщение отправлено!\n\n"
+            "Кстати — хочешь и сам(а) получать анонимные мнения о своей внешности от друзей? "
+            "Заполни анкету за минуту — просто напиши свой *возраст* числом 👇",
+            parse_mode="Markdown",
+        )
+
+
 def get_unread_messages(user_id):
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(
-        "SELECT id, from_user, content, message_type, file_id FROM messages "
+        "SELECT id, from_user, content, message_type, file_id, is_anon FROM messages "
         "WHERE to_user=%s AND read=FALSE ORDER BY created_at DESC",
         (user_id,),
     )
@@ -1026,7 +1088,7 @@ def notify_admins(text, reply_markup=None):
 def get_registered_users_for_broadcast():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE is_banned=FALSE")
+    cur.execute("SELECT id FROM users WHERE registered=TRUE AND is_banned=FALSE")
     users = cur.fetchall()
     cur.close()
     conn.close()
@@ -1101,16 +1163,61 @@ def show_rated_profile(uid, target, rating):
 # REGISTRATION
 # =========================================================
 
+def handle_anon_deeplink(uid, m, target_part, user):
+    """Entry point for someone who opened a personal '?start=anon_<id>'
+    link. Deliberately does NOT force full registration first — the whole
+    point is a friend can drop one anonymous opinion with near-zero
+    friction. We still create a bare user row (for ban/rate-limit
+    tracking), we just don't make them fill in age/photo/etc. before
+    they're allowed to send."""
+    if not target_part.isdigit():
+        bot.send_message(uid, "⚠️ Эта ссылка недействительна.")
+        return
+    target_id = int(target_part)
+    target = get_user(target_id)
+    if target_id == uid:
+        bot.send_message(uid, "😄 Нельзя отправить анонимное сообщение самому(-ой) себе.")
+        return
+    if not target or not target.get("registered") or target.get("is_banned"):
+        bot.send_message(uid, "⚠️ Этот пользователь недоступен.")
+        return
+
+    if not user:
+        create_user(uid, m.from_user.username or f"user_{uid}", m.from_user.first_name)
+        user = get_user(uid)
+    if user.get("is_banned"):
+        bot.send_message(uid, "⛔ Твой аккаунт заблокирован модерацией.")
+        return
+    if count_anon_sent_today(uid) >= ANON_DAILY_SEND_CAP:
+        bot.send_message(uid, "⏳ Ты уже отправил(а) много анонимных сообщений сегодня — попробуй завтра.")
+        return
+
+    set_state(uid, action="sending_anon", target_id=target_id)
+    display_name = target.get("name") or "этого человека"
+    bot.send_message(
+        uid,
+        f"🕵️ *Анонимное мнение о внешности*\n\n"
+        f"Напиши, что ты думаешь о внешности пользователя *{md_safe(display_name)}* — "
+        "он(а) не узнает, кто именно написал. Можно текстом, голосовым или кружком 👇",
+        parse_mode="Markdown",
+    )
+
+
 @bot.message_handler(commands=["start"])
 def start(m):
     uid = m.chat.id
     user = get_user(uid)
+    parts = m.text.split(maxsplit=1)
+    deep_arg = parts[1] if len(parts) > 1 else None
+
+    if deep_arg and deep_arg.startswith("anon_"):
+        handle_anon_deeplink(uid, m, deep_arg[5:], user)
+        return
 
     if not user:
         referred_by = None
-        parts = m.text.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].startswith("ref_"):
-            ref_part = parts[1][4:]
+        if deep_arg and deep_arg.startswith("ref_"):
+            ref_part = deep_arg[4:]
             if ref_part.isdigit():
                 candidate = int(ref_part)
                 if candidate != uid and get_user(candidate):
@@ -1341,6 +1448,18 @@ def handle_text(m):
         if handle_profile_edit_text(uid, m):
             return
 
+    # --- sending an anonymous message (via personal anon_ link) ---
+    # Checked before the registration/age branch below: a bare, not-yet-
+    # registered anon sender has no age set, so if their actual message
+    # text happens to be a plain number (e.g. "10"), it must NOT be
+    # mistaken for an age answer.
+    if state.get("action") == "sending_anon":
+        target_id = state.get("target_id")
+        save_message(uid, target_id, m.text, "text", is_anon=True)
+        clear_state(uid)
+        finish_anon_send(uid)
+        return
+
     # --- registration ---
     if not user.get("age") and m.text.isdigit():
         age = int(m.text)
@@ -1436,6 +1555,8 @@ def handle_text(m):
         show_top(m)
     elif m.text == "👥 Пригласить друзей":
         show_referral(m)
+    elif m.text == "🕵️ Анонимные мнения":
+        show_anon_link(m)
     elif m.text == "🎁 Бонус":
         claim_daily_bonus(m)
     elif m.text == "🎥 Верификация":
@@ -1478,6 +1599,12 @@ def handle_photo(m):
 def handle_voice(m):
     uid = m.chat.id
     state = get_state(uid)
+    if state.get("action") == "sending_anon":
+        target_id = state.get("target_id")
+        save_message(uid, target_id, "🎤 Голосовое сообщение", "voice", m.voice.file_id, is_anon=True)
+        clear_state(uid)
+        finish_anon_send(uid)
+        return
     if state.get("action") == "sending_message" and state.get("msg_type") == "voice":
         target_id = state.get("target_id")
         save_message(uid, target_id, "🎤 Голосовое сообщение", "voice", m.voice.file_id)
@@ -1496,6 +1623,12 @@ def handle_circle(m):
     state = get_state(uid)
     if state.get("action") == "verifying":
         handle_verification_circle(m, uid)
+        return
+    if state.get("action") == "sending_anon":
+        target_id = state.get("target_id")
+        save_message(uid, target_id, "🎙️ Кружок", "circle", m.video_note.file_id, is_anon=True)
+        clear_state(uid)
+        finish_anon_send(uid)
         return
     if state.get("action") == "sending_message" and state.get("msg_type") == "circle":
         target_id = state.get("target_id")
@@ -1938,6 +2071,22 @@ def show_referral(m):
     bot.send_message(uid, text, parse_mode="Markdown")
 
 
+def show_anon_link(m):
+    uid = m.chat.id
+    user = get_user(uid)
+    if not user or not user.get("registered"):
+        bot.send_message(uid, "❌ Сначала заверши регистрацию через /start")
+        return
+    link = anon_link(uid)
+    text = (
+        "🕵️ *Узнай, что о тебе думают на самом деле*\n\n"
+        "Скинь эту ссылку друзьям — в сторис, в чат, куда угодно. "
+        "Они напишут, что думают о твоей внешности, а ты *не увидишь*, кто именно написал.\n\n"
+        f"Твоя ссылка:\n`{link}`"
+    )
+    bot.send_message(uid, text, parse_mode="Markdown")
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "share_profile")
 def share_profile(c):
     uid = c.from_user.id
@@ -2064,14 +2213,24 @@ def read_messages(m):
         return
 
     for msg in messages:
-        kb = letter_reply_kb(msg["from_user"])
-        if msg["message_type"] == "text":
-            bot.send_message(uid, f"💌 *Тебе написали:*\n\n{msg['content']}", reply_markup=kb, parse_mode="Markdown")
-        elif msg["message_type"] == "voice":
-            bot.send_voice(uid, msg["file_id"], caption="🎤 Тебе прислали голосовое письмо", reply_markup=kb)
-        elif msg["message_type"] == "circle":
-            bot.send_video_note(uid, msg["file_id"])
-            bot.send_message(uid, "🎙️ Тебе прислали кружок ⬆️", reply_markup=kb)
+        if msg.get("is_anon"):
+            kb = anon_message_kb(msg["from_user"])
+            if msg["message_type"] == "text":
+                bot.send_message(uid, f"🕵️ *Анонимное мнение о тебе:*\n\n{msg['content']}", reply_markup=kb, parse_mode="Markdown")
+            elif msg["message_type"] == "voice":
+                bot.send_voice(uid, msg["file_id"], caption="🕵️ Анонимное голосовое мнение о тебе", reply_markup=kb)
+            elif msg["message_type"] == "circle":
+                bot.send_video_note(uid, msg["file_id"])
+                bot.send_message(uid, "🕵️ Анонимный кружок с мнением о тебе ⬆️", reply_markup=kb)
+        else:
+            kb = letter_reply_kb(msg["from_user"])
+            if msg["message_type"] == "text":
+                bot.send_message(uid, f"💌 *Тебе написали:*\n\n{msg['content']}", reply_markup=kb, parse_mode="Markdown")
+            elif msg["message_type"] == "voice":
+                bot.send_voice(uid, msg["file_id"], caption="🎤 Тебе прислали голосовое письмо", reply_markup=kb)
+            elif msg["message_type"] == "circle":
+                bot.send_video_note(uid, msg["file_id"])
+                bot.send_message(uid, "🎙️ Тебе прислали кружок ⬆️", reply_markup=kb)
         mark_message_read(msg["id"])
 
     bot.send_message(uid, "✅ Все письма прочитаны", reply_markup=main_menu())
@@ -2157,6 +2316,22 @@ def handle_msg(c):
     set_state(uid, action="choosing_message_type", target_id=target_id)
     bot.answer_callback_query(c.id)
     bot.send_message(uid, "💌 Выбери тип письма:", reply_markup=message_type_kb(target_id))
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("anonreply_"))
+def handle_anon_reply(c):
+    uid = c.from_user.id
+    target_id = int(c.data.split("_")[1])
+    target = get_user(target_id)
+    if not target or target.get("is_banned"):
+        bot.answer_callback_query(c.id, "Пользователь недоступен")
+        return
+    if count_anon_sent_today(uid) >= ANON_DAILY_SEND_CAP:
+        bot.answer_callback_query(c.id, "Дневной лимит анонимных сообщений исчерпан")
+        return
+    set_state(uid, action="sending_anon", target_id=target_id)
+    bot.answer_callback_query(c.id)
+    bot.send_message(uid, "🕵️ Напиши анонимный ответ (текст, голосовое или кружок):")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("askuser_"))
